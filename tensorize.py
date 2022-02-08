@@ -1,13 +1,14 @@
 import util
 import numpy as np
 import random
-from transformers import BertTokenizer
+from transformers import BertTokenizer, AutoTokenizer
 import os
 from os.path import join
 import json
 import pickle
 import logging
 import torch
+import itertools
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class CorefDataProcessor:
                 is_training = (split == 'trn')
                 with open(path, 'r') as f:
                     samples = [json.loads(line) for line in f.readlines()]
+                print(util.count_singletons(samples))
                 tensor_samples = [tensorizer.tensorize_example(sample, is_training) for sample in samples]
                 self.tensor_samples[split] = [(doc_key, self.convert_to_torch_tensor(*tensor)) for doc_key, tensor in tensor_samples]
             self.stored_info = tensorizer.stored_info
@@ -80,7 +82,7 @@ class CorefDataProcessor:
 class Tensorizer:
     def __init__(self, config):
         self.config = config
-        self.tokenizer = BertTokenizer.from_pretrained(config['bert_tokenizer_name'])
+        self.tokenizer = AutoTokenizer.from_pretrained(config['bert_tokenizer_name'])
 
         # Will be used in evaluation
         self.stored_info = {}

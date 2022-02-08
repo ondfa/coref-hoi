@@ -5,6 +5,7 @@ import pyhocon
 import logging
 import torch
 import random
+import json
 
 
 logger = logging.getLogger(__name__)
@@ -64,3 +65,69 @@ def batch_select(tensor, idx, device=torch.device('cpu')):
         selected = torch.squeeze(selected, -1)
 
     return selected
+
+
+def count_singletons(examples):
+    return sum([len([cluster for cluster in example["clusters"] if len(cluster) == 1]) for example in examples])
+
+
+def discard_singletons_all(examples):
+    for example in examples:
+        example["clusters"] = [cluster for cluster in example["clusters"] if len(cluster) > 1]
+    return examples
+
+
+def discard_singletons(clusters):
+    return [cluster for cluster in clusters if len(cluster) > 1]
+
+
+def find_singletons_conll(file):
+    singletons = {}
+    with open(file) as f:
+        for line in f.read().splitlines():
+            if line.startswith("#") or line == "":
+                continue
+            clusters_str = line.split("\t")[11]
+            clusters = clusters_str.split("|")
+            for cluster in clusters:
+                if(cluster.startswith("(")):
+                    number = cluster[1:].replace(")", "")
+                    if number in singletons:
+                        singletons[number] = False
+                    else:
+                        singletons[number] = True
+    return set([k for k, v in singletons.items() if v])
+
+
+def filter_conll(file, output_file):
+    singletons = find_singletons_conll(file)
+    with open(file) as r:
+        with open(output_file, "w") as w:
+            for line in r.read().splitlines():
+                changed = False
+                if line.startswith("#") or line == "":
+                    w.write(line + "\n")
+                    continue
+                split = line.split("\t")
+                clusters_str = split[11]
+                clusters = clusters_str.split("|")
+                new_clusters = []
+                for cluster in clusters:
+                    if cluster.replace("(", "").replace(")", "") in singletons:
+                        changed = True
+                    else:
+                        new_clusters.append(cluster)
+                if changed:
+                    split[11] = "|".join(new_clusters)
+                    w.write("\t".join(split) + "\n")
+                else:
+                    w.write(line + "\n")
+
+
+if __name__ == '__main__':
+    # with open("./data/UD/slavic/test.czech.512.jsonlines") as f:
+    #     samples = [json.loads(line) for line in f.readlines()]
+    #     samples = discard_singletons(samples)
+    #     with open("./data/UD/slavic/test.czech.512.filtered.jsonlines", "w") as w:
+    #         json.dump(samples, w)
+    filter_conll("./data/UD/test.catalan.conllu", "./data/UD/test.catalan.filtered.conllu")

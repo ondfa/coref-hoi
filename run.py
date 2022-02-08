@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AdamW
-from torch.optim import Adam
+from torch.optim import Adam, SGD
 from tensorize import CorefDataProcessor
 import util
 import time
@@ -15,6 +15,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from model import CorefModel
 import conll
 import sys
+import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU')
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -45,7 +47,7 @@ class Runner:
         self.device = torch.device('cpu' if gpu_id is None else f'cuda:{gpu_id}')
 
         # Set up data
-        self.data = CorefDataProcessor(self.config)
+        self.data = CorefDataProcessor(self.config, language=self.config.language)
 
     def initialize_model(self, saved_suffix=None):
         model = CorefModel(self.config, self.device)
@@ -54,6 +56,7 @@ class Runner:
         return model
 
     def train(self, model):
+        best_model_path = None
         conf = self.config
         logger.info(conf)
         epochs, grad_accum = conf['num_epochs'], conf['gradient_accumulation_steps']
@@ -99,6 +102,7 @@ class Runner:
                 # Forward pass
                 model.train()
                 example_gpu = [d.to(self.device) for d in example]
+                torch.cuda.empty_cache()
                 _, loss = model(*example_gpu)
 
                 # Backward; accumulate gradients and clip by grad norm
@@ -143,19 +147,32 @@ class Runner:
                         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
                         if f1 > max_f1:
                             max_f1 = f1
-                            self.save_model_checkpoint(model, len(loss_history))
+                            best_model_path = self.save_model_checkpoint(model, len(loss_history))
                         logger.info('Eval max f1: %.2f' % max_f1)
                         start_time = time.time()
+                example_gpu = [e.detach() for e in example_gpu]
 
         logger.info('**********Finished training**********')
         logger.info('Actual update steps: %d' % len(loss_history))
-
+        logger.info('**********Dev eval**********')
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
+        logger.info('**********Test eval**********')
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions.conllu"))
+        if best_model_path is not None:
+            logger.info('**********Best model evaluation**********')
+            self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
+            self.evaluate(model, examples_test, stored_info, 0, official=True, conll_path=self.config['conll_test_path'])
         # Wrap up
         tb_writer.close()
         return loss_history
 
-    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None):
+    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=None):
+        if isinstance(conll_path, list):
+            for path in self.config['conll_test_path']:
+                self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer)
+            return 0.0, None
         logger.info('Step %d: evaluating on %d samples...' % (step, len(tensor_examples)))
+        logger.info('Gold path: ' + conll_path)
         model.to(self.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
@@ -170,6 +187,8 @@ class Runner:
             span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
             antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
             predicted_clusters = model.update_evaluator(span_starts, span_ends, antecedent_idx, antecedent_scores, gold_clusters, evaluator)
+            if self.config["filter_singletons"]:
+                predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters
 
         p, r, f = evaluator.get_prf()
@@ -180,7 +199,7 @@ class Runner:
                 tb_writer.add_scalar(name, score, step)
 
         if official:
-            conll_results = conll.evaluate_conll(conll_path, doc_to_prediction, stored_info['subtoken_maps'])
+            conll_results = conll.evaluate_conll(conll_path, doc_to_prediction, stored_info['subtoken_maps'], save_predictions=save_predictions)
             official_f1 = sum(results["f"] for results in conll_results.values()) / len(conll_results)
             logger.info('Official avg F1: %.4f' % official_f1)
 
@@ -224,6 +243,7 @@ class Runner:
         optimizers = [
             AdamW(grouped_bert_param, lr=self.config['bert_learning_rate'], eps=self.config['adam_eps']),
             Adam(model.get_params()[1], lr=self.config['task_learning_rate'], eps=self.config['adam_eps'], weight_decay=0)
+            # SGD(model.get_params()[1], lr=self.config['task_learning_rate'], weight_decay=0)
         ]
         return optimizers
         # grouped_parameters = [
@@ -275,6 +295,7 @@ class Runner:
         path_ckpt = join(self.config['log_dir'], f'model_{self.name_suffix}_{step}.bin')
         torch.save(model.state_dict(), path_ckpt)
         logger.info('Saved model to %s' % path_ckpt)
+        return path_ckpt
 
     def load_model_checkpoint(self, model, suffix):
         path_ckpt = join(self.config['log_dir'], f'model_{suffix}.bin')
@@ -284,7 +305,7 @@ class Runner:
 
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
-    runner = Runner(config_name, gpu_id)
+    runner = Runner(config_name, None)
     model = runner.initialize_model()
 
     runner.train(model)

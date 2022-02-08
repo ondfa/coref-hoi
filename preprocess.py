@@ -4,7 +4,7 @@ import os
 import re
 import collections
 import json
-from transformers import BertTokenizer
+from transformers import BertTokenizer, AutoTokenizer
 import conll
 import util
 
@@ -129,7 +129,7 @@ class DocumentState(object):
         subtoken_map = util.flatten(self.segment_subtoken_map)
 
         # Sanity check
-        assert len(all_mentions) == len(set(all_mentions))  # Each mention unique
+        # assert len(all_mentions) == len(set(all_mentions))  # Each mention unique
         # Below should have length: # all subtokens with CLS, SEP in all segments
         num_all_seg_tokens = len(util.flatten(self.segments))
         assert num_all_seg_tokens == len(util.flatten(self.speakers))
@@ -246,11 +246,16 @@ def minimize_partition(partition, extension, args, tokenizer):
 
 
 def minimize_language(args):
-    tokenizer = BertTokenizer.from_pretrained(args.tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
 
-    minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
-    minimize_partition('test', 'v4_gold_conll', args, tokenizer)
-    minimize_partition('train', 'v4_gold_conll', args, tokenizer)
+    # minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
+    # minimize_partition('test', 'v4_gold_conll', args, tokenizer)
+    # minimize_partition('train', 'v4_gold_conll', args, tokenizer)
+
+
+    minimize_partition('train', 'conllu', args, tokenizer)
+    minimize_partition('dev', 'conllu', args, tokenizer)
+    minimize_partition('test', 'conllu', args, tokenizer)
 
 
 if __name__ == '__main__':
@@ -261,7 +266,7 @@ if __name__ == '__main__':
                         help='Input directory that contains conll files')
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Output directory')
-    parser.add_argument('--seg_len', type=int, default=128,
+    parser.add_argument('--seg_len', type=int, default=512,
                         help='Segment length: 128, 256, 384, 512')
     parser.add_argument('--language', type=str, default='english',
                         help='english, chinese, arabic')

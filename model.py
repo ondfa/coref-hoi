@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import BertModel
+from transformers import AutoConfig, AutoModel
 import util
 import logging
 from collections import Iterable
@@ -13,7 +13,6 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger()
-
 
 class CorefModel(nn.Module):
     def __init__(self, config, device, num_genres=None):
@@ -30,7 +29,9 @@ class CorefModel(nn.Module):
 
         # Model
         self.dropout = nn.Dropout(p=config['dropout_rate'])
-        self.bert = BertModel.from_pretrained(config['bert_pretrained_name_or_path'])
+        bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'])
+        bert_config.return_dict = False
+        self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
 
         self.bert_emb_size = self.bert.config.hidden_size
         self.span_emb_size = self.bert_emb_size * 3
@@ -278,7 +279,7 @@ class CorefModel(nn.Module):
         top_antecedent_gold_labels = torch.cat([dummy_antecedent_labels, pairwise_labels], dim=1)
 
         # Get loss
-        top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1)
+        top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1) # pridava score pro dummy
         if conf['loss_type'] == 'marginalized':
             log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
             log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
