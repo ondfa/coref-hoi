@@ -5,6 +5,7 @@ import operator
 import collections
 import logging
 
+import udapi.core.coref
 from udapi.core.coref import CorefCluster
 
 logger = logging.getLogger(__name__)
@@ -148,11 +149,13 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
                     for c in word_map[word_index]:
                         cluster_id = c[0]
                         cluster = udapi_clusters.get(cluster_id)
-                        cluster.create_mention(head=word, mention_span=str(word_index) + "-" + str(c[1]))
+                        cluster.create_mention(head=word, mention_span=str(word.ord) + "-" + str(word.ord + c[1] - word_index))
                 word_index += 1
 
         # doc._coref_clusters = {c._cluster_id: c for c in sorted(udapi_clusters.values())}
         doc._coref_clusters = udapi_clusters
+        udapi.core.coref.store_coref_to_misc(doc)
+        return udapi_docs
 
 
 def official_conll_eval(gold_path, predicted_path, metric, official_stdout=True):
