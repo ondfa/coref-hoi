@@ -5,6 +5,8 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AdamW
 from torch.optim import Adam, SGD
+
+import udapi_io
 from tensorize import CorefDataProcessor
 import util
 import time
@@ -199,9 +201,15 @@ class Runner:
                 tb_writer.add_scalar(name, score, step)
 
         if official:
-            conll_results = conll.evaluate_conll(conll_path, doc_to_prediction, stored_info['subtoken_maps'], save_predictions=save_predictions)
+            conll_results = conll.evaluate_conll(conll_path, doc_to_prediction, stored_info['subtoken_maps'], save_predictions=None)
             official_f1 = sum(results["f"] for results in conll_results.values()) / len(conll_results)
             logger.info('Official avg F1: %.4f' % official_f1)
+        if save_predictions is not None:
+            udapi_docs = conll.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
+            udapi_io.write_data(udapi_docs, save_predictions)
+            # with open(save_predictions, "w", encoding="utf-8") as w, open(self.config["conll_pred_path"], encoding="utf-8") as r:
+            #     print("predicting...")
+            #     conll.output_conll_corefud(r, w, doc_to_prediction, stored_info['subtoken_maps'])
 
         return f * 100, metrics
 
@@ -305,7 +313,7 @@ class Runner:
 
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
-    runner = Runner(config_name, None)
+    runner = Runner(config_name, gpu_id)
     model = runner.initialize_model()
 
     runner.train(model)

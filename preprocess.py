@@ -7,6 +7,7 @@ import json
 from transformers import BertTokenizer, AutoTokenizer
 import conll
 import util
+import udapi_io
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO)
@@ -149,6 +150,87 @@ class DocumentState(object):
             'pronouns': self.pronouns
         }
 
+    def finalize_from_udapi(self, udapi_doc):
+        """ Extract clusters; fill other info e.g. speakers, pronouns """
+        # Populate speakers from info
+        subtoken_idx = 0
+        for seg_info in self.segment_info:
+            speakers = []
+            for i, subtoken_info in enumerate(seg_info):
+                if i == 0 or i == len(seg_info) - 1:
+                    speakers.append('[SPL]')
+                elif subtoken_info is not None:  # First subtoken of each word
+                    speakers.append("SPEAKER1")
+                    if subtoken_info[4] == 'PRP':
+                        self.pronouns.append(subtoken_idx)
+                else:
+                    speakers.append(speakers[-1])
+                subtoken_idx += 1
+            self.speakers += [speakers]
+
+        # Populate cluster
+        first_subtoken_idx = 0  # Subtoken idx across segments
+        subtokens_info = util.flatten(self.segment_info)
+        for word in udapi_doc.nodes:
+            subtoken_info = subtokens_info[first_subtoken_idx]
+            corefs = word.coref_mentions
+            if len(corefs) > 0:
+                last_subtoken_idx = first_subtoken_idx + subtoken_info[-1] - 1
+                for part in corefs:
+                    cluster_id = part.cluster.cluster_id
+                    if part.span[0] == word.ord:
+                        if part.span[-1] == word.ord:
+                            self.clusters[cluster_id].append((first_subtoken_idx, last_subtoken_idx))
+                        else:
+                            self.coref_stacks[cluster_id].append(first_subtoken_idx)
+                    else:
+                        start = self.coref_stacks[cluster_id].pop()
+                        self.clusters[cluster_id].append((start, last_subtoken_idx))
+            first_subtoken_idx += 1
+
+        # Merge clusters if any clusters have common mentions
+        merged_clusters = []
+        for cluster in self.clusters.values():
+            existing = None
+            for mention in cluster:
+                for merged_cluster in merged_clusters:
+                    if mention in merged_cluster:
+                        existing = merged_cluster
+                        break
+                if existing is not None:
+                    break
+            if existing is not None:
+                print("Merging clusters (shouldn't happen very often)")
+                existing.update(cluster)
+            else:
+                merged_clusters.append(set(cluster))
+
+        merged_clusters = [list(cluster) for cluster in merged_clusters]
+        all_mentions = util.flatten(merged_clusters)
+        sentence_map = get_sentence_map(self.segments, self.sentence_end)
+        subtoken_map = util.flatten(self.segment_subtoken_map)
+
+        # Sanity check
+        # assert len(all_mentions) == len(set(all_mentions))  # Each mention unique
+        # Below should have length: # all subtokens with CLS, SEP in all segments
+        num_all_seg_tokens = len(util.flatten(self.segments))
+        assert num_all_seg_tokens == len(util.flatten(self.speakers))
+        assert num_all_seg_tokens == len(subtoken_map)
+        assert num_all_seg_tokens == len(sentence_map)
+
+        return {
+            "doc_key": self.doc_key,
+            "tokens": self.tokens,
+            "sentences": self.segments,
+            "speakers": self.speakers,
+            "constituents": [],
+            "ner": [],
+            "clusters": merged_clusters,
+            'sentence_map': sentence_map,
+            "subtoken_map": subtoken_map,
+            'pronouns': self.pronouns
+        }
+
 
 def split_into_segments(document_state: DocumentState, max_seg_len, constraints1, constraints2, tokenizer):
     """ Split into segments.
@@ -183,7 +265,7 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
         prev_token_idx = subtoken_map[-1]
 
 
-def get_document(doc_key, doc_lines, language, seg_len, tokenizer):
+def get_document(doc_key, doc_lines, language, seg_len, tokenizer, udapi_document=None):
     """ Process raw input to finalized documents """
     document_state = DocumentState(doc_key)
     word_idx = -1
@@ -194,7 +276,7 @@ def get_document(doc_key, doc_lines, language, seg_len, tokenizer):
         if len(row) == 0:
             document_state.sentence_end[-1] = True
         else:
-            assert len(row) >= 12
+            # assert len(row) >= 12
             word_idx += 1
             word = normalize_word(row[3], language)
             subtokens = tokenizer.tokenize(word)
@@ -210,7 +292,10 @@ def get_document(doc_key, doc_lines, language, seg_len, tokenizer):
     # Split documents
     constraits1 = document_state.sentence_end if language != 'arabic' else document_state.token_end
     split_into_segments(document_state, seg_len, constraits1, document_state.token_end, tokenizer)
-    document = document_state.finalize()
+    if udapi_document is not None:
+        document = document_state.finalize_from_udapi(udapi_document)
+    else:
+        document = document_state.finalize()
     return document
 
 
@@ -224,21 +309,22 @@ def minimize_partition(partition, extension, args, tokenizer):
     documents = []  # [(doc_key, lines)]
     with open(input_path, 'r') as input_file:
         for line in input_file.readlines():
-            begin_document_match = re.match(conll.BEGIN_DOCUMENT_REGEX, line)
+            begin_document_match = re.match(conll.BEGIN_DOCUMENT_REGEX_COREFUD, line)
             if begin_document_match:
-                doc_key = conll.get_doc_key(begin_document_match.group(1), begin_document_match.group(2))
+                doc_key = begin_document_match.group(1)
                 documents.append((doc_key, []))
-            elif line.startswith('#end document'):
+            elif line.startswith('#'):
                 continue
             else:
                 documents[-1][1].append(line)
 
     # Write documents
     with open(output_path, 'w') as output_file:
+        udapi_documents = udapi_io.read_data(input_path)
         for doc_key, doc_lines in documents:
             if skip_doc(doc_key):
                 continue
-            document = get_document(doc_key, doc_lines, args.language, args.seg_len, tokenizer)
+            document = get_document(doc_key, doc_lines, args.language, args.seg_len, tokenizer, udapi_documents[doc_count])
             output_file.write(json.dumps(document))
             output_file.write('\n')
             doc_count += 1

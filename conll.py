@@ -5,9 +5,12 @@ import operator
 import collections
 import logging
 
+from udapi.core.coref import CorefCluster
+
 logger = logging.getLogger(__name__)
 
 BEGIN_DOCUMENT_REGEX = re.compile(r"#begin document \((.*)\); part (\d+)")  # First line at each document
+BEGIN_DOCUMENT_REGEX_COREFUD = re.compile(r"# newdoc id = (.*)")  # First line at each document
 COREF_RESULTS_REGEX = re.compile(r".*Coreference: Recall: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tPrecision: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tF1: ([0-9.]+)%.*", re.DOTALL)
 
 
@@ -69,6 +72,87 @@ def output_conll(input_file, output_file, predictions, subtoken_map):
             output_file.write("   ".join(row))
             output_file.write("\n")
             word_index += 1
+
+
+def output_conll_corefud(input_file, output_file, predictions, subtoken_map):
+    prediction_map = {}
+    for doc_key, clusters in predictions.items():
+        start_map = collections.defaultdict(list)
+        end_map = collections.defaultdict(list)
+        word_map = collections.defaultdict(list)
+        for cluster_id, mentions in enumerate(clusters):
+            for start, end in mentions:
+                start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
+                if start == end:
+                    word_map[start].append(cluster_id)
+                else:
+                    start_map[start].append((cluster_id, end))
+                    end_map[end].append((cluster_id, start))
+        for k,v in start_map.items():
+            start_map[k] = [cluster_id for cluster_id, end in sorted(v, key=operator.itemgetter(1), reverse=True)]
+        for k,v in end_map.items():
+            end_map[k] = [cluster_id for cluster_id, start in sorted(v, key=operator.itemgetter(1), reverse=True)]
+        prediction_map[doc_key] = (start_map, end_map, word_map)
+
+    word_index = 0
+    for line in input_file.readlines():
+        row = line.split()
+        if len(row) == 0:
+            output_file.write("\n")
+        elif row[0].startswith("#"):
+            begin_match = re.match(BEGIN_DOCUMENT_REGEX_COREFUD, line)
+            if begin_match:
+                doc_key = begin_match.group(1)
+                start_map, end_map, word_map = prediction_map[doc_key]
+                word_index = 0
+            output_file.write(line)
+        else:
+            coref_list = []
+            if word_index in end_map:
+                for cluster_id in end_map[word_index]:
+                    coref_list.append("{})".format(cluster_id))
+            if word_index in word_map:
+                for cluster_id in word_map[word_index]:
+                    coref_list.append("({})".format(cluster_id))
+            if word_index in start_map:
+                for cluster_id in start_map[word_index]:
+                    coref_list.append("({}".format(cluster_id))
+
+            if len(coref_list) == 0:
+                row[-1] = "-"
+            else:
+                row[-1] = "|".join(coref_list)
+
+            output_file.write("   ".join(row))
+            output_file.write("\n")
+            word_index += 1
+
+def map_to_udapi(udapi_docs, predictions, subtoken_map):
+    udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
+    for doc_key, clusters in predictions.items():
+        word_map = collections.defaultdict(list)
+        doc = udapi_docs_map[doc_key.split("_")[0]]
+        udapi_clusters = {}
+        for cluster_id, mentions in enumerate(clusters):
+            cluster = udapi_clusters.get(cluster_id)
+            if cluster is None:
+                cluster = CorefCluster(cluster_id)
+                udapi_clusters[cluster_id] = cluster
+            for start, end in mentions:
+                start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
+                word_map[start].append((cluster_id, end))
+                # cluster.create_mention(mention_span=str(start) + "-" + str(end))
+            word_index = 0
+            for word in doc.nodes:
+                if word_index in word_map.keys():
+                    for c in word_map[word_index]:
+                        cluster_id = c[0]
+                        cluster = udapi_clusters.get(cluster_id)
+                        cluster.create_mention(head=word, mention_span=str(word_index) + "-" + str(c[1]))
+                word_index += 1
+
+        # doc._coref_clusters = {c._cluster_id: c for c in sorted(udapi_clusters.values())}
+        doc._coref_clusters = udapi_clusters
 
 
 def official_conll_eval(gold_path, predicted_path, metric, official_stdout=True):
