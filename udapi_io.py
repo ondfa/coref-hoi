@@ -5,15 +5,16 @@ from udapi.block.write.conllu import Conllu as ConlluWriter
 
 def read_data(file):
     reader = ConlluReader(files=file, split_docs=True)
-    doc = udapi.Document(None)
     docs = []
     while not reader.finished:
+        doc = udapi.Document(None)
         reader.process_document(doc)
         docs.append(doc)
-        doc = udapi.Document(None)
     # for doc in docs:
     #     for word in doc.nodes:
     #         pass
+    docs[-1].draw()
+    list(docs[-1].coref_clusters.values())[0].cluster_id
     return docs
 
 def write_data(docs, file):

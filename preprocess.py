@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import sys
 import re
 import collections
 import json
@@ -171,19 +172,26 @@ class DocumentState(object):
         # Populate cluster
         first_subtoken_idx = 0  # Subtoken idx across segments
         subtokens_info = util.flatten(self.segment_info)
-        for word in udapi_doc.nodes:
+        for word in udapi_doc.nodes_and_empty:
+            while subtokens_info[first_subtoken_idx] is None or "-" in subtokens_info[first_subtoken_idx][0]:
+                first_subtoken_idx += 1
             subtoken_info = subtokens_info[first_subtoken_idx]
             corefs = word.coref_mentions
+            if str(word.ord) != subtoken_info[0]:
+                print("fd")
+                pass
             if len(corefs) > 0:
                 last_subtoken_idx = first_subtoken_idx + subtoken_info[-1] - 1
                 for part in corefs:
+                    if "," in part.span:
+                        continue    # Skip discontinuous mentions
                     cluster_id = part.cluster.cluster_id
-                    if part.span[0] == word.ord:
-                        if part.span[-1] == word.ord:
+                    if part.span.split("-")[0] == str(word.ord):
+                        if part.span.split("-")[-1] == str(word.ord):
                             self.clusters[cluster_id].append((first_subtoken_idx, last_subtoken_idx))
                         else:
                             self.coref_stacks[cluster_id].append(first_subtoken_idx)
-                    else:
+                    elif part.span.split("-")[-1] == str(word.ord):
                         start = self.coref_stacks[cluster_id].pop()
                         self.clusters[cluster_id].append((start, last_subtoken_idx))
             first_subtoken_idx += 1
@@ -300,8 +308,8 @@ def get_document(doc_key, doc_lines, language, seg_len, tokenizer, udapi_documen
 
 
 def minimize_partition(partition, extension, args, tokenizer):
-    input_path = os.path.join(args.input_dir, f'{partition}.{args.language}.{extension}')
-    output_path = os.path.join(args.output_dir, f'{partition}.{args.language}.{args.seg_len}.jsonlines')
+    input_path = os.path.join(args.input_dir, f'{args.language}-{partition}.{extension}')
+    output_path = os.path.join(args.output_dir, f'{args.language}-{partition}.{args.seg_len}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
 
@@ -339,14 +347,17 @@ def minimize_language(args):
     # minimize_partition('train', 'v4_gold_conll', args, tokenizer)
 
 
-    minimize_partition('train', 'conllu', args, tokenizer)
-    minimize_partition('dev', 'conllu', args, tokenizer)
     minimize_partition('test', 'conllu', args, tokenizer)
+    minimize_partition('dev', 'conllu', args, tokenizer)
+    minimize_partition('train', 'conllu', args, tokenizer)
 
 
 if __name__ == '__main__':
+    sys.argv.extend(['--input_dir', 'data/UD/CorefUD-1.0-public/data/CorefUD_French-Democrat/'])
+    sys.argv.extend(['--output_dir', 'data/UD/CorefUD-1.0-public/data/CorefUD_French-Democrat/'])
+    sys.argv.extend(['--language', 'fr_democrat-corefud'])
     parser = argparse.ArgumentParser()
-    parser.add_argument('--tokenizer_name', type=str, default='bert-base-cased',
+    parser.add_argument('--tokenizer_name', type=str, default='bert-base-multilingual-cased',
                         help='Name or path of the tokenizer/vocabulary')
     parser.add_argument('--input_dir', type=str, required=True,
                         help='Input directory that contains conll files')

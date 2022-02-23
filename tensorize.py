@@ -34,9 +34,9 @@ class CorefDataProcessor:
             self.tensor_samples = {}
             tensorizer = Tensorizer(self.config)
             paths = {
-                'trn': join(self.data_dir, f'train.{language}.{self.max_seg_len}.jsonlines'),
-                'dev': join(self.data_dir, f'dev.{language}.{self.max_seg_len}.jsonlines'),
-                'tst': join(self.data_dir, f'test.{language}.{self.max_seg_len}.jsonlines')
+                'trn': join(self.data_dir, f'{language}-train.{self.max_seg_len}.jsonlines'),
+                'dev': join(self.data_dir, f'{language}-dev.{self.max_seg_len}.jsonlines'),
+                'tst': join(self.data_dir, f'{language}-test.{self.max_seg_len}.jsonlines')
             }
             for split, path in paths.items():
                 logger.info('Tensorizing examples from %s; results will be cached)' % path)
@@ -90,6 +90,7 @@ class Tensorizer:
         self.stored_info['subtoken_maps'] = {}  # {doc_key: ...}; mapping back to tokens
         self.stored_info['gold'] = {}  # {doc_key: ...}
         self.stored_info['genre_dict'] = {genre: idx for idx, genre in enumerate(config['genres'])}
+
 
     def _tensorize_spans(self, spans):
         if len(spans) > 0:
