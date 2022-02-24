@@ -205,7 +205,7 @@ class Runner:
             official_f1 = sum(results["f"] for results in conll_results.values()) / len(conll_results)
             logger.info('Official avg F1: %.4f' % official_f1)
         if save_predictions is not None:
-            udapi_docs = conll.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
+            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
             udapi_io.write_data(udapi_docs, save_predictions)
             # with open(save_predictions, "w", encoding="utf-8") as w, open(self.config["conll_pred_path"], encoding="utf-8") as r:
             #     print("predicting...")

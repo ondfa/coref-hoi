@@ -5,9 +5,6 @@ import operator
 import collections
 import logging
 
-import udapi.core.coref
-from udapi.core.coref import CorefCluster, span_to_nodes
-
 logger = logging.getLogger(__name__)
 
 BEGIN_DOCUMENT_REGEX = re.compile(r"#begin document \((.*)\); part (\d+)")  # First line at each document
@@ -127,26 +124,6 @@ def output_conll_corefud(input_file, output_file, predictions, subtoken_map):
             output_file.write("   ".join(row))
             output_file.write("\n")
             word_index += 1
-
-def map_to_udapi(udapi_docs, predictions, subtoken_map):
-    udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
-    for doc_key, clusters in predictions.items():
-        doc = udapi_docs_map[doc_key]
-        udapi_words = [word for word in doc.nodes_and_empty]
-        udapi_clusters = {}
-        for cluster_id, mentions in enumerate(clusters):
-            cluster = udapi_clusters.get(cluster_id)
-            if cluster is None:
-                cluster = CorefCluster(str(cluster_id))
-                udapi_clusters[cluster_id] = cluster
-            for start, end in mentions:
-                start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
-                mention = udapi.core.coref.CorefMention(words=udapi_words[start: end + 1], head=udapi_words[start], cluster=cluster)
-
-        # doc._coref_clusters = {c._cluster_id: c for c in sorted(udapi_clusters.values())}
-        doc._coref_clusters = udapi_clusters
-        udapi.core.coref.store_coref_to_misc(doc)
-        return udapi_docs
 
 
 def official_conll_eval(gold_path, predicted_path, metric, official_stdout=True):
