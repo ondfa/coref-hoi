@@ -157,13 +157,13 @@ class Runner:
         logger.info('**********Finished training**********')
         logger.info('Actual update steps: %d' % len(loss_history))
         logger.info('**********Dev eval**********')
-        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
         logger.info('**********Test eval**********')
-        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions.conllu"))
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions.conllu"))
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_test, stored_info, 0, official=True, conll_path=self.config['conll_test_path'])
+            self.evaluate(model, examples_test, stored_info, 0, official=False, conll_path=self.config['conll_test_path'])
         # Wrap up
         tb_writer.close()
         return loss_history

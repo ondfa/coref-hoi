@@ -13,8 +13,6 @@ def read_data(file):
     # for doc in docs:
     #     for word in doc.nodes:
     #         pass
-    docs[-1].draw()
-    list(docs[-1].coref_clusters.values())[0].cluster_id
     return docs
 
 def write_data(docs, file):
@@ -24,12 +22,6 @@ def write_data(docs, file):
             writer.before_process_document(doc)
             writer.process_document(doc)
         writer.after_process_document(None)
-
-def corefUD2onto(docs):
-    pass
-
-def onto2corefUD(docs, corefUD_docs):
-    pass
 
 if __name__ == '__main__':
     docs = read_data("data/UD/CorefUD-0.1-public/data/CorefUD_Czech-PDT/cs_pdt-corefud-dev.conllu")

@@ -6,7 +6,7 @@ import collections
 import logging
 
 import udapi.core.coref
-from udapi.core.coref import CorefCluster
+from udapi.core.coref import CorefCluster, span_to_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -131,26 +131,17 @@ def output_conll_corefud(input_file, output_file, predictions, subtoken_map):
 def map_to_udapi(udapi_docs, predictions, subtoken_map):
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
     for doc_key, clusters in predictions.items():
-        word_map = collections.defaultdict(list)
-        doc = udapi_docs_map[doc_key.split("_")[0]]
+        doc = udapi_docs_map[doc_key]
+        udapi_words = [word for word in doc.nodes_and_empty]
         udapi_clusters = {}
         for cluster_id, mentions in enumerate(clusters):
             cluster = udapi_clusters.get(cluster_id)
             if cluster is None:
-                cluster = CorefCluster(cluster_id)
+                cluster = CorefCluster(str(cluster_id))
                 udapi_clusters[cluster_id] = cluster
             for start, end in mentions:
                 start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
-                word_map[start].append((cluster_id, end))
-                # cluster.create_mention(mention_span=str(start) + "-" + str(end))
-            word_index = 0
-            for word in doc.nodes:
-                if word_index in word_map.keys():
-                    for c in word_map[word_index]:
-                        cluster_id = c[0]
-                        cluster = udapi_clusters.get(cluster_id)
-                        cluster.create_mention(head=word, mention_span=str(word.ord) + "-" + str(word.ord + c[1] - word_index))
-                word_index += 1
+                mention = udapi.core.coref.CorefMention(words=udapi_words[start: end + 1], head=udapi_words[start], cluster=cluster)
 
         # doc._coref_clusters = {c._cluster_id: c for c in sorted(udapi_clusters.values())}
         doc._coref_clusters = udapi_clusters
