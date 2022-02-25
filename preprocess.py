@@ -162,8 +162,6 @@ class DocumentState(object):
                     speakers.append('[SPL]')
                 elif subtoken_info is not None:  # First subtoken of each word
                     speakers.append("SPEAKER1")
-                    if subtoken_info[4] == 'PRP':
-                        self.pronouns.append(subtoken_idx)
                 else:
                     speakers.append(speakers[-1])
                 subtoken_idx += 1
@@ -173,11 +171,11 @@ class DocumentState(object):
         first_subtoken_idx = 0  # Subtoken idx across segments
         subtokens_info = util.flatten(self.segment_info)
         for word in udapi_doc.nodes_and_empty:
-            while subtokens_info[first_subtoken_idx] is None or "-" in subtokens_info[first_subtoken_idx][0]:
+            while subtokens_info[first_subtoken_idx] is None:
                 first_subtoken_idx += 1
             subtoken_info = subtokens_info[first_subtoken_idx]
             corefs = word.coref_mentions
-            if str(word.ord) != subtoken_info[0]:
+            if word.ord != subtoken_info[0]:
                 print("fd")
                 pass
             if len(corefs) > 0:
@@ -279,23 +277,24 @@ def get_document(doc_key, doc_lines, language, seg_len, tokenizer, udapi_documen
     word_idx = -1
 
     # Build up documents
-    for line in doc_lines:
-        row = line.split()  # Columns for each token
-        if len(row) == 0:
+    last_ord = 0
+    for node in udapi_document.nodes_and_empty:
+        if last_ord >= node.ord:
             document_state.sentence_end[-1] = True
-        else:
             # assert len(row) >= 12
-            word_idx += 1
-            word = normalize_word(row[3], language)
-            subtokens = tokenizer.tokenize(word)
-            document_state.tokens.append(word)
-            document_state.token_end += [False] * (len(subtokens) - 1) + [True]
-            for idx, subtoken in enumerate(subtokens):
-                document_state.subtokens.append(subtoken)
-                info = None if idx != 0 else (row + [len(subtokens)])
-                document_state.info.append(info)
-                document_state.sentence_end.append(False)
-                document_state.subtoken_map.append(word_idx)
+        word_idx += 1
+        word = normalize_word(node.form, language)
+        subtokens = tokenizer.tokenize(word)
+        document_state.tokens.append(word)
+        document_state.token_end += [False] * (len(subtokens) - 1) + [True]
+        for idx, subtoken in enumerate(subtokens):
+            document_state.subtokens.append(subtoken)
+            info = None if idx != 0 else ([node.ord] + [node.form] + [len(subtokens)])
+            document_state.info.append(info)
+            document_state.sentence_end.append(False)
+            document_state.subtoken_map.append(word_idx)
+        last_ord = node.ord
+    document_state.sentence_end[-1] = True
 
     # Split documents
     constraits1 = document_state.sentence_end if language != 'arabic' else document_state.token_end
@@ -308,8 +307,8 @@ def get_document(doc_key, doc_lines, language, seg_len, tokenizer, udapi_documen
 
 
 def minimize_partition(partition, extension, args, tokenizer):
-    input_path = os.path.join(args.input_dir, f'{args.language}-{partition}.{extension}')
-    output_path = os.path.join(args.output_dir, f'{args.language}-{partition}.{args.seg_len}.jsonlines')
+    input_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{extension}')
+    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{args.max_segment_len}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
 
@@ -332,7 +331,7 @@ def minimize_partition(partition, extension, args, tokenizer):
         for doc_key, doc_lines in documents:
             if skip_doc(doc_key):
                 continue
-            document = get_document(doc_key, doc_lines, args.language, args.seg_len, tokenizer, udapi_documents[doc_count])
+            document = get_document(doc_key, doc_lines, args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count])
             output_file.write(json.dumps(document))
             output_file.write('\n')
             doc_count += 1
@@ -340,7 +339,7 @@ def minimize_partition(partition, extension, args, tokenizer):
 
 
 def minimize_language(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name)
 
     # minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
     # minimize_partition('test', 'v4_gold_conll', args, tokenizer)
@@ -353,25 +352,9 @@ def minimize_language(args):
 
 
 if __name__ == '__main__':
-    sys.argv.extend(['--input_dir', 'data/UD/CorefUD-1.0-public/data/CorefUD_French-Democrat/'])
-    sys.argv.extend(['--output_dir', 'data/UD/CorefUD-1.0-public/data/CorefUD_French-Democrat/'])
-    sys.argv.extend(['--language', 'fr_democrat-corefud'])
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--tokenizer_name', type=str, default='bert-base-multilingual-cased',
-                        help='Name or path of the tokenizer/vocabulary')
-    parser.add_argument('--input_dir', type=str, required=True,
-                        help='Input directory that contains conll files')
-    parser.add_argument('--output_dir', type=str, required=True,
-                        help='Output directory')
-    parser.add_argument('--seg_len', type=int, default=512,
-                        help='Segment length: 128, 256, 384, 512')
-    parser.add_argument('--language', type=str, default='english',
-                        help='english, chinese, arabic')
-    # parser.add_argument('--lower_case', action='store_true',
-    #                     help='Do lower case on input')
+    config_name = sys.argv[1]
+    config = util.initialize_config(config_name)
 
-    args = parser.parse_args()
-    logger.info(args)
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(config.data_dir, exist_ok=True)
 
-    minimize_language(args)
+    minimize_language(config)
