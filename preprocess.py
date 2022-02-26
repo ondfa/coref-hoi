@@ -271,7 +271,7 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
         prev_token_idx = subtoken_map[-1]
 
 
-def get_document(doc_key, doc_lines, language, seg_len, tokenizer, udapi_document=None):
+def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
     """ Process raw input to finalized documents """
     document_state = DocumentState(doc_key)
     word_idx = -1
@@ -312,26 +312,11 @@ def minimize_partition(partition, extension, args, tokenizer):
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
 
-    # Read documents
-    documents = []  # [(doc_key, lines)]
-    with open(input_path, 'r') as input_file:
-        for line in input_file.readlines():
-            begin_document_match = re.match(conll.BEGIN_DOCUMENT_REGEX_COREFUD, line)
-            if begin_document_match:
-                doc_key = begin_document_match.group(1)
-                documents.append((doc_key, []))
-            elif line.startswith('#'):
-                continue
-            else:
-                documents[-1][1].append(line)
-
     # Write documents
     with open(output_path, 'w') as output_file:
         udapi_documents = udapi_io.read_data(input_path)
-        for doc_key, doc_lines in documents:
-            if skip_doc(doc_key):
-                continue
-            document = get_document(doc_key, doc_lines, args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count])
+        for doc in udapi_documents:
+            document = get_document(doc.meta["docname"], args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count])
             output_file.write(json.dumps(document))
             output_file.write('\n')
             doc_count += 1
