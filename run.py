@@ -1,5 +1,7 @@
 import logging
 import random
+import subprocess
+
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -7,7 +9,7 @@ from transformers import AdamW
 from torch.optim import Adam, SGD
 
 import udapi_io
-from tensorize import CorefDataProcessor
+from tensorize import CorefDataProcessor, Tensorizer
 import util
 import time
 from os.path import join
@@ -24,6 +26,30 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger()
+
+
+def evaluate_coreud(gold_path, pred_path):
+    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    process.wait()
+
+    stdout = stdout.decode("utf-8")
+    if stderr is not None:
+        logger.error(stderr)
+    logger.info("Official result for {}".format(pred_path))
+    logger.info(stdout)
+
+    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "remove_singletons"]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    process.wait()
+
+    stdout = stdout.decode("utf-8")
+    if stderr is not None:
+        logger.error(stderr)
+    logger.info("Official result without singletons for {}".format(pred_path))
+    logger.info(stdout)
 
 
 class Runner:
@@ -143,7 +169,7 @@ class Runner:
                         tb_writer.add_scalar('Training_Loss', avg_loss, len(loss_history))
                         tb_writer.add_scalar('Learning_Rate_Bert', schedulers[0].get_last_lr()[0], len(loss_history))
                         tb_writer.add_scalar('Learning_Rate_Task', schedulers[1].get_last_lr()[-1], len(loss_history))
-
+                    example_gpu = [e.detach().cpu() for e in example_gpu]
                     # Evaluate
                     if len(loss_history) > 0 and len(loss_history) % conf['eval_frequency'] == 0:
                         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
@@ -152,7 +178,7 @@ class Runner:
                             best_model_path = self.save_model_checkpoint(model, len(loss_history))
                         logger.info('Eval max f1: %.2f' % max_f1)
                         start_time = time.time()
-                example_gpu = [e.detach() for e in example_gpu]
+
 
         logger.info('**********Finished training**********')
         logger.info('Actual update steps: %d' % len(loss_history))
@@ -183,12 +209,29 @@ class Runner:
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             gold_clusters = stored_info['gold'][doc_key]
             tensor_example = tensor_example[:7]  # Strip out gold
-            example_gpu = [d.to(self.device) for d in tensor_example]
-            with torch.no_grad():
-                _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores = model(*example_gpu)
-            span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
-            antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
-            predicted_clusters = model.update_evaluator(span_starts, span_ends, antecedent_idx, antecedent_scores, gold_clusters, evaluator)
+            max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
+            num_sentences = tensor_example[0].shape[0]
+            if num_sentences <= max_sentences:
+                batch_examples = [tensor_example]
+            else:
+                batch_examples = Tensorizer(self.config).split_example(*tensor_example)
+            predicted_clusters = []
+            mention_to_cluster_id = {}
+            for offset, exaple in enumerate(batch_examples):
+                example_gpu = [d.to(self.device) for d in exaple]
+                with torch.no_grad():
+                    _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores = model(*example_gpu)
+                    sentence_len = tensor_example[3]
+                    word_offset = sentence_len[:offset].sum()
+                    span_starts = span_starts + word_offset
+                    span_ends = span_ends + word_offset
+                example_gpu = [e.detach().cpu() for e in example_gpu]
+                span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
+                antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
+                tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
+                predicted_clusters.extend(tmp_predicted_clusters)
+                mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
+            predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
             if self.config["filter_singletons"]:
                 predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters
@@ -207,6 +250,7 @@ class Runner:
         if save_predictions is not None:
             udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
             udapi_io.write_data(udapi_docs, save_predictions)
+            evaluate_coreud(self.config["conll_pred_path"], save_predictions)
             # with open(save_predictions, "w", encoding="utf-8") as w, open(self.config["conll_pred_path"], encoding="utf-8") as r:
             #     print("predicting...")
             #     conll.output_conll_corefud(r, w, doc_to_prediction, stored_info['subtoken_maps'])

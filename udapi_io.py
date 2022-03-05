@@ -44,7 +44,7 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
         # doc._coref_clusters = {c._cluster_id: c for c in sorted(udapi_clusters.values())}
         doc._coref_clusters = udapi_clusters
         udapi.core.coref.store_coref_to_misc(doc)
-        return udapi_docs
+    return udapi_docs
 
 if __name__ == '__main__':
     docs = read_data("data/UD/CorefUD-0.1-public/data/CorefUD_Czech-PDT/cs_pdt-corefud-dev.conllu")

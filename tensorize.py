@@ -172,7 +172,7 @@ class Tensorizer:
             return doc_key, example_tensor
 
     def truncate_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
-                         gold_starts, gold_ends, gold_mention_cluster_map, sentence_offset=None):
+                         gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
         max_sentences = self.config["max_training_sentences"]
         num_sentences = input_ids.shape[0]
         assert num_sentences > max_sentences
@@ -189,6 +189,8 @@ class Tensorizer:
         sentence_len = sentence_len[sent_offset: sent_offset + max_sentences]
 
         sentence_map = sentence_map[word_offset: word_offset + num_words]
+        if gold_starts is None:
+            return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training
         gold_spans = (gold_starts < word_offset + num_words) & (gold_ends >= word_offset)
         gold_starts = gold_starts[gold_spans] - word_offset
         gold_ends = gold_ends[gold_spans] - word_offset
@@ -196,3 +198,15 @@ class Tensorizer:
 
         return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, \
                is_training, gold_starts, gold_ends, gold_mention_cluster_map
+
+    def split_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
+                      gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
+        max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
+        num_sentences = input_ids.shape[0]
+        offset = 0
+        splits = []
+        while offset < num_sentences:
+            splits.append(self.truncate_example(input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
+                                                gold_starts, gold_ends, gold_mention_cluster_map, sentence_offset=offset))
+            offset += max_sentences
+        return splits

@@ -408,6 +408,9 @@ class CorefModel(nn.Module):
 
     def update_evaluator(self, span_starts, span_ends, antecedent_idx, antecedent_scores, gold_clusters, evaluator):
         predicted_clusters, mention_to_cluster_id, _ = self.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
+        return self.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
+
+    def update_evaluator_from_clusters(self, predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator):
         mention_to_predicted = {m: predicted_clusters[cluster_idx] for m, cluster_idx in mention_to_cluster_id.items()}
         gold_clusters = [tuple(tuple(m) for m in cluster) for cluster in gold_clusters]
         mention_to_gold = {m: cluster for cluster in gold_clusters for m in cluster}
