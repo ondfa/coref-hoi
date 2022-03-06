@@ -189,7 +189,7 @@ class Runner:
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_test, stored_info, 0, official=False, conll_path=self.config['conll_test_path'])
+            self.evaluate(model, examples_test, stored_info, 0, official=False, conll_path=self.config['conll_test_path'], save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions-best.conllu"))
         # Wrap up
         tb_writer.close()
         return loss_history
@@ -206,6 +206,7 @@ class Runner:
         doc_to_prediction = {}
 
         model.eval()
+        max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             gold_clusters = stored_info['gold'][doc_key]
             tensor_example = tensor_example[:7]  # Strip out gold
@@ -217,11 +218,12 @@ class Runner:
                 batch_examples = Tensorizer(self.config).split_example(*tensor_example)
             predicted_clusters = []
             mention_to_cluster_id = {}
-            for offset, exaple in enumerate(batch_examples):
-                example_gpu = [d.to(self.device) for d in exaple]
+            for j, example in enumerate(batch_examples):
+                example_gpu = [d.to(self.device) for d in example]
                 with torch.no_grad():
                     _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores = model(*example_gpu)
                     sentence_len = tensor_example[3]
+                    offset = j * max_sentences
                     word_offset = sentence_len[:offset].sum()
                     span_starts = span_starts + word_offset
                     span_ends = span_ends + word_offset
