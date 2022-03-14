@@ -6,16 +6,7 @@ from udapi.core.coref import CorefCluster
 
 
 def read_data(file):
-    reader = ConlluReader(files=file, split_docs=True)
-    docs = []
-    while not reader.finished:
-        doc = udapi.Document(None)
-        reader.process_document(doc)
-        docs.append(doc)
-    # for doc in docs:
-    #     for word in doc.nodes:
-    #         pass
-    return docs
+    return ConlluReader(files=file, split_docs=True).read_documents()
 
 def write_data(docs, file):
     with open(file, "wt", encoding="utf-8") as f:
@@ -31,18 +22,12 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
     for doc_key, clusters in predictions.items():
         doc = udapi_docs_map[doc_key]
         udapi_words = [word for word in doc.nodes_and_empty]
-        udapi_clusters = {}
-        for cluster_id, mentions in enumerate(clusters):
-            cluster = udapi_clusters.get(cluster_id)
-            if cluster is None:
-                cluster = CorefCluster(str(cluster_id))
-                udapi_clusters[cluster_id] = cluster
+        doc._coref_clusters = {}
+        for mentions in clusters:
+            cluster = doc.create_coref_cluster()
             for start, end in mentions:
                 start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
-                mention = udapi.core.coref.CorefMention(words=udapi_words[start: end + 1], head=udapi_words[start], cluster=cluster)
-
-        # doc._coref_clusters = {c._cluster_id: c for c in sorted(udapi_clusters.values())}
-        doc._coref_clusters = udapi_clusters
+                cluster.create_mention(words=udapi_words[start: end + 1])
         udapi.core.coref.store_coref_to_misc(doc)
     return udapi_docs
 
