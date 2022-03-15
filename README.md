@@ -61,6 +61,7 @@ Some important configurations in [experiments.conf](experiments.conf):
 | czech-pcedt    | 69.59 | 69.73                   |
 | english-gum    | 50.80 | 65.76                   |
 | english-parcor | 57.47 | 58.12                   |
+| french         | 38.10 | 55.09                   |
 | german-Potsdam | 45.35 | 58.89                   |
 | german-parcor  | 55.40 | 56.51                   |
 | hungarian      | 56.15 | 57.40                   |
