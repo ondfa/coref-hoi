@@ -54,21 +54,22 @@ Some important configurations in [experiments.conf](experiments.conf):
 
 ## Results
 
-| Language       | F1    | F1 (without singletons) |
+|                | F1    | F1 (without singletons) |
 |----------------|-------|-------------------------|
 | catalan        | 50.29 | 62.78                   |
-| czech-pdt      | 60.52 | 66.64                   |
+| czech          | 60.52 | 66.64                   |
 | czech-pcedt    | 69.59 | 69.73                   |
 | english-gum    | 50.80 | 65.76                   |
 | english-parcor | 57.47 | 58.12                   |
-| french         | 38.10 | 55.09                   |
-| german-Potsdam | 45.35 | 58.89                   |
+| german         | 45.35 | 58.89                   |
 | german-parcor  | 55.40 | 56.51                   |
 | hungarian      | 56.15 | 57.40                   |
 | lithuanian     | 67.02 | 67.90                   |
 | polish         | 43.13 | 62.39                   |
 | russian        | 62.33 | 62.43                   |
 | spanish        | 50.22 | 64.81                   |
+|                |
+| avg            | 54.19 | 62.48                   |
 
 ## Citation
 ```

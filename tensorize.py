@@ -36,7 +36,7 @@ class CorefDataProcessor:
             paths = {
                 'trn': join(self.data_dir, f'{language}-train.{self.max_seg_len}.jsonlines'),
                 'dev': join(self.data_dir, f'{language}-dev.{self.max_seg_len}.jsonlines'),
-                'tst': join(self.data_dir, f'{language}-test.{self.max_seg_len}.jsonlines')
+                # 'tst': join(self.data_dir, f'{language}-test.{self.max_seg_len}.jsonlines')
             }
             for split, path in paths.items():
                 logger.info('Tensorizing examples from %s; results will be cached)' % path)
@@ -69,7 +69,7 @@ class CorefDataProcessor:
 
     def get_tensor_examples(self):
         # For each split, return list of tensorized samples to allow variable length input (batch size = 1)
-        return self.tensor_samples['trn'], self.tensor_samples['dev'], self.tensor_samples['tst']
+        return self.tensor_samples['trn'], self.tensor_samples['dev']
 
     def get_stored_info(self):
         return self.stored_info

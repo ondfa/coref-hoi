@@ -1,6 +1,7 @@
 import logging
 import random
 import subprocess
+import tempfile
 
 import numpy as np
 import torch
@@ -40,7 +41,7 @@ def evaluate_coreud(gold_path, pred_path):
     logger.info("Official result for {}".format(pred_path))
     logger.info(stdout)
 
-    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "remove_singletons"]
+    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-s"]
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     stdout, stderr = process.communicate()
     process.wait()
@@ -48,7 +49,7 @@ def evaluate_coreud(gold_path, pred_path):
     stdout = stdout.decode("utf-8")
     if stderr is not None:
         logger.error(stderr)
-    logger.info("Official result without singletons for {}".format(pred_path))
+    logger.info("Official result with singletons for {}".format(pred_path))
     logger.info(stdout)
 
 
@@ -100,7 +101,7 @@ class Runner:
         logger.info('Tensorboard summary path: %s' % tb_path)
 
         # Set up data
-        examples_train, examples_dev, examples_test = self.data.get_tensor_examples()
+        examples_train, examples_dev = self.data.get_tensor_examples()
         stored_info = self.data.get_stored_info()
 
         # Set up optimizer and scheduler
@@ -185,22 +186,16 @@ class Runner:
         logger.info('**********Dev eval**********')
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
         logger.info('**********Test eval**********')
-        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions.conllu"))
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions.conllu"))
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_test, stored_info, 0, official=False, conll_path=self.config['conll_test_path'], save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions-best.conllu"))
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions-best.conllu"))
         # Wrap up
         tb_writer.close()
         return loss_history
 
     def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=None):
-        if isinstance(conll_path, list):
-            for path in self.config['conll_test_path']:
-                self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer)
-            return 0.0, None
-        logger.info('Step %d: evaluating on %d samples...' % (step, len(tensor_examples)))
-        logger.info('Gold path: ' + conll_path)
         model.to(self.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
@@ -210,7 +205,6 @@ class Runner:
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             gold_clusters = stored_info['gold'][doc_key]
             tensor_example = tensor_example[:7]  # Strip out gold
-            max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
             num_sentences = tensor_example[0].shape[0]
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
@@ -246,13 +240,16 @@ class Runner:
                 tb_writer.add_scalar(name, score, step)
 
         if official:
-            conll_results = conll.evaluate_conll(conll_path, doc_to_prediction, stored_info['subtoken_maps'], save_predictions=None)
-            official_f1 = sum(results["f"] for results in conll_results.values()) / len(conll_results)
-            logger.info('Official avg F1: %.4f' % official_f1)
-        if save_predictions is not None:
             udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
-            udapi_io.write_data(udapi_docs, save_predictions)
-            evaluate_coreud(self.config["conll_pred_path"], save_predictions)
+
+            if save_predictions is not None:
+                fd = open(save_predictions, "wt", encoding="utf-8")
+            else:
+                fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
+            udapi_io.write_data(udapi_docs, fd)
+            fd.flush()
+            evaluate_coreud(self.config["conll_pred_path"], fd.name)
+            fd.close()
             # with open(save_predictions, "w", encoding="utf-8") as w, open(self.config["conll_pred_path"], encoding="utf-8") as r:
             #     print("predicting...")
             #     conll.output_conll_corefud(r, w, doc_to_prediction, stored_info['subtoken_maps'])
