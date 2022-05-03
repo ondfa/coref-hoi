@@ -183,7 +183,7 @@ class DocumentState(object):
                 for part in corefs:
                     if "," in part.span:
                         continue    # Skip discontinuous mentions
-                    cluster_id = part.cluster.cluster_id
+                    cluster_id = part.entity.eid
                     if part.span.split("-")[0] == str(word.ord):
                         if part.span.split("-")[-1] == str(word.ord):
                             self.clusters[cluster_id].append((first_subtoken_idx, last_subtoken_idx))
