@@ -7,6 +7,7 @@ from collections import Iterable
 import numpy as np
 import torch.nn.init as init
 import higher_order as ho
+import wandb
 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -324,12 +325,18 @@ class CorefModel(nn.Module):
                 logger.info('---------debug step: %d---------' % self.update_steps)
                 # logger.info('candidates: %d; antecedents: %d' % (num_candidates, max_top_antecedents))
                 logger.info('spans/gold: %d/%d; ratio: %.2f' % (num_top_spans, (top_span_cluster_ids > 0).sum(), (top_span_cluster_ids > 0).sum()/num_top_spans))
+                logger.info('Number of gold spans: %d, mention identification recall: %.2f' % (gold_starts.shape[0], (top_span_cluster_ids > 0).sum() / gold_starts.shape[0]))
+                metrics = {"spans_ratio": (top_span_cluster_ids > 0).sum()/num_top_spans, "mention_recall": (top_span_cluster_ids > 0).sum() / gold_starts.shape[0]}
                 if conf['mention_loss_coef']:
                     logger.info('mention loss: %.4f' % loss_mention)
+                    metrics["mention_loss"] = loss_mention
                 if conf['loss_type'] == 'marginalized':
                     logger.info('norm/gold: %.4f/%.4f' % (torch.sum(log_norm), torch.sum(log_marginalized_antecedent_scores)))
+                    metrics["loss"] = loss
                 else:
                     logger.info('loss: %.4f' % loss)
+                    metrics["loss"] = loss
+                wandb.log(metrics)
         self.update_steps += 1
 
         return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedent_idx, top_antecedent_scores], loss

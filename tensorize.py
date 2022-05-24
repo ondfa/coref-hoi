@@ -80,9 +80,10 @@ class CorefDataProcessor:
 
 
 class Tensorizer:
-    def __init__(self, config):
+    def __init__(self, config, local_files_only=False, load_tokenizer=True):
         self.config = config
-        self.tokenizer = AutoTokenizer.from_pretrained(config['bert_tokenizer_name'])
+        if load_tokenizer:
+            self.tokenizer = AutoTokenizer.from_pretrained(config['bert_tokenizer_name'], local_files_only=local_files_only)
 
         # Will be used in evaluation
         self.stored_info = {}

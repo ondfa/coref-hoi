@@ -5,6 +5,7 @@ import tempfile
 
 import numpy as np
 import torch
+import wandb
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AdamW
 from torch.optim import Adam, SGD
@@ -21,6 +22,8 @@ from model import CorefModel
 import conll
 import sys
 import tensorflow as tf
+import os
+
 tf.config.set_visible_devices([], 'GPU')
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -28,6 +31,14 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     level=logging.INFO)
 logger = logging.getLogger()
 
+WANDB_API_KEY_DIR = 'wandb_private/wandbkey.txt'
+
+def load_wandb_api_key(path):
+    with open(path, "r", encoding='utf-8') as f:
+        data = f.read().replace('\n', '')
+
+    data = data.strip()
+    return data
 
 def evaluate_coreud(gold_path, pred_path):
     cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path]
@@ -40,6 +51,9 @@ def evaluate_coreud(gold_path, pred_path):
         logger.error(stderr)
     logger.info("Official result for {}".format(pred_path))
     logger.info(stdout)
+    import re
+    result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
+    score = float(result.group(1))
 
     cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-s"]
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
@@ -51,6 +65,9 @@ def evaluate_coreud(gold_path, pred_path):
         logger.error(stderr)
     logger.info("Official result with singletons for {}".format(pred_path))
     logger.info(stdout)
+    result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
+    score_with_singletons = float(result.group(1))
+    return score, score_with_singletons
 
 
 class Runner:
@@ -77,6 +94,11 @@ class Runner:
 
         # Set up data
         self.data = CorefDataProcessor(self.config, language=self.config.language)
+        wandb_api_key = load_wandb_api_key(WANDB_API_KEY_DIR)
+        os.environ["WANDB_API_KEY"] = wandb_api_key
+        os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
+        import wandb
+        wandb.init(project="coref-multiling", entity="ondfa", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
 
     def initialize_model(self, saved_suffix=None):
         model = CorefModel(self.config, self.device)
@@ -166,14 +188,14 @@ class Runner:
                         logger.info('Step %d: avg loss %.2f; steps/sec %.2f' %
                                     (len(loss_history), avg_loss, conf['report_frequency'] / (end_time - start_time)))
                         start_time = end_time
-
+                        wandb.log({"train_loss": avg_loss, "lr_bert": schedulers[0].get_last_lr()[0], "lr_task": schedulers[1].get_last_lr()[-1], "epoch": epo})
                         tb_writer.add_scalar('Training_Loss', avg_loss, len(loss_history))
                         tb_writer.add_scalar('Learning_Rate_Bert', schedulers[0].get_last_lr()[0], len(loss_history))
                         tb_writer.add_scalar('Learning_Rate_Task', schedulers[1].get_last_lr()[-1], len(loss_history))
                     example_gpu = [e.detach().cpu() for e in example_gpu]
                     # Evaluate
                     if len(loss_history) > 0 and len(loss_history) % conf['eval_frequency'] == 0:
-                        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
+                        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
                         if f1 > max_f1:
                             max_f1 = f1
                             best_model_path = self.save_model_checkpoint(model, len(loss_history))
@@ -190,12 +212,12 @@ class Runner:
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions-best.conllu"))
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions-best.conllu"), phase="best_model_eval")
         # Wrap up
         tb_writer.close()
         return loss_history
 
-    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=None):
+    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=None, phase="eval"):
         model.to(self.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
@@ -209,7 +231,7 @@ class Runner:
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
             else:
-                batch_examples = Tensorizer(self.config).split_example(*tensor_example)
+                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example)
             predicted_clusters = []
             mention_to_cluster_id = {}
             for j, example in enumerate(batch_examples):
@@ -233,11 +255,7 @@ class Runner:
             doc_to_prediction[doc_key] = predicted_clusters
 
         p, r, f = evaluator.get_prf()
-        metrics = {'Eval_Avg_Precision': p * 100, 'Eval_Avg_Recall': r * 100, 'Eval_Avg_F1': f * 100}
-        for name, score in metrics.items():
-            logger.info('%s: %.2f' % (name, score))
-            if tb_writer:
-                tb_writer.add_scalar(name, score, step)
+        metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100}
 
         if official:
             udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
@@ -248,11 +266,18 @@ class Runner:
                 fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
             udapi_io.write_data(udapi_docs, fd)
             fd.flush()
-            evaluate_coreud(self.config["conll_pred_path"], fd.name)
+            score, score_with_singletons = evaluate_coreud(self.config["conll_pred_path"], fd.name)
+            metrics[phase + "_corefud_score"] = score
+            metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
             fd.close()
-            # with open(save_predictions, "w", encoding="utf-8") as w, open(self.config["conll_pred_path"], encoding="utf-8") as r:
-            #     print("predicting...")
-            #     conll.output_conll_corefud(r, w, doc_to_prediction, stored_info['subtoken_maps'])
+
+        for name, score in metrics.items():
+            logger.info('%s: %.2f' % (name, score))
+            wandb.run.summary[name] = score
+            if tb_writer:
+                tb_writer.add_scalar(name, score, step)
+        wandb.log(metrics)
+
 
         return f * 100, metrics
 
