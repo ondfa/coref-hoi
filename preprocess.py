@@ -314,7 +314,13 @@ def minimize_partition(partition, extension, args, tokenizer):
 
     # Write documents
     with open(output_path, 'w') as output_file:
-        udapi_documents = udapi_io.read_data(input_path)
+        if args.joined_languages is not None:
+            udapi_documents = []
+            for i in range(len(args.joined_languages)):
+                input_path = os.path.join(args.joined_dirs[i], f'{args.joined_languages[i]}-{partition}.{extension}')
+                udapi_documents.extend(udapi_io.read_data(input_path))
+        else:
+            udapi_documents = udapi_io.read_data(input_path)
         for doc in udapi_documents:
             document = get_document(doc.meta["docname"], args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count])
             output_file.write(json.dumps(document))

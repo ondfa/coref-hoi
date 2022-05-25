@@ -198,7 +198,10 @@ class Runner:
                         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
                         if f1 > max_f1:
                             max_f1 = f1
-                            best_model_path = self.save_model_checkpoint(model, len(loss_history))
+                            new_path = self.save_model_checkpoint(model, len(loss_history))
+                            if best_model_path is not None:
+                                os.remove(best_model_path)
+                            best_model_path = new_path
                         logger.info('Eval max f1: %.2f' % max_f1)
                         start_time = time.time()
 
@@ -218,6 +221,10 @@ class Runner:
         return loss_history
 
     def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=None, phase="eval"):
+        if isinstance(conll_path, list):
+            for path in self.config['conll_test_path']:
+                self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer)
+            return 0.0, None
         model.to(self.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
@@ -253,12 +260,14 @@ class Runner:
             if self.config["filter_singletons"]:
                 predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters
-
+        dataset = conll_path.split("/")[-1].split("-")[0]
         p, r, f = evaluator.get_prf()
         metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100}
-
+        metrics[phase + "_" + dataset + "_Avg_Precision"] = p * 100
+        metrics[phase + "_" + dataset + "_Avg_Recall"] = r * 100
+        metrics[phase + "_" + dataset + "_Avg_F1"] = f * 100
         if official:
-            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(self.config["conll_pred_path"]), doc_to_prediction, stored_info['subtoken_maps'])
+            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(conll_path), doc_to_prediction, stored_info['subtoken_maps'])
 
             if save_predictions is not None:
                 fd = open(save_predictions, "wt", encoding="utf-8")
@@ -266,9 +275,11 @@ class Runner:
                 fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
             udapi_io.write_data(udapi_docs, fd)
             fd.flush()
-            score, score_with_singletons = evaluate_coreud(self.config["conll_pred_path"], fd.name)
+            score, score_with_singletons = evaluate_coreud(conll_path, fd.name)
             metrics[phase + "_corefud_score"] = score
             metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
+            metrics[phase + "_" + dataset + "_corefud_score"] = score
+            metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
             fd.close()
 
         for name, score in metrics.items():
@@ -381,7 +392,7 @@ class Runner:
 
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
-    runner = Runner(config_name, gpu_id)
+    runner = Runner(config_name, None)
     model = runner.initialize_model()
 
     runner.train(model)

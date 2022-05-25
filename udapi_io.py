@@ -18,9 +18,12 @@ def write_data(docs, f):
 
 def map_to_udapi(udapi_docs, predictions, subtoken_map):
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
+    docs = []
     for doc_key, clusters in predictions.items():
         doc = udapi_docs_map[doc_key]
         udapi_words = [word for word in doc.nodes_and_empty]
+        for word in udapi_words:
+            word.misc = {}
         doc._eid_to_entity = {}
         for mentions in clusters:
             entity = doc.create_coref_entity()
@@ -28,7 +31,8 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
                 start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
                 entity.create_mention(words=udapi_words[start: end + 1])
         udapi.core.coref.store_coref_to_misc(doc)
-    return udapi_docs
+        docs.append(doc)
+    return docs
 
 if __name__ == '__main__':
     docs = read_data("data/UD/CorefUD-0.1-public/data/CorefUD_Czech-PDT/cs_pdt-corefud-dev.conllu")
