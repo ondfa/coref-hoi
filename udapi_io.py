@@ -20,6 +20,8 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
     docs = []
     for doc_key, clusters in predictions.items():
+        if doc_key not in udapi_docs_map:
+            continue
         doc = udapi_docs_map[doc_key]
         udapi_words = [word for word in doc.nodes_and_empty]
         for word in udapi_words:

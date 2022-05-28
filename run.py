@@ -53,7 +53,10 @@ def evaluate_coreud(gold_path, pred_path):
     logger.info(stdout)
     import re
     result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
-    score = float(result.group(1))
+    if result is None:
+        score = 0.0
+    else:
+        score = float(result.group(1))
 
     cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-s"]
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
@@ -66,7 +69,10 @@ def evaluate_coreud(gold_path, pred_path):
     logger.info("Official result with singletons for {}".format(pred_path))
     logger.info(stdout)
     result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
-    score_with_singletons = float(result.group(1))
+    if result is None:
+        score_with_singletons = 0.0
+    else:
+        score_with_singletons = float(result.group(1))
     return score, score_with_singletons
 
 
@@ -392,7 +398,7 @@ class Runner:
 
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
-    runner = Runner(config_name, None)
+    runner = Runner(config_name, gpu_id)
     model = runner.initialize_model()
 
     runner.train(model)
