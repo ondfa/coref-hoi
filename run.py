@@ -23,6 +23,7 @@ import conll
 import sys
 import tensorflow as tf
 import os
+from functools import cmp_to_key
 
 tf.config.set_visible_devices([], 'GPU')
 
@@ -110,6 +111,8 @@ class Runner:
         model = CorefModel(self.config, self.device)
         if saved_suffix:
             self.load_model_checkpoint(model, saved_suffix)
+        if "load_model_from_exp" in self.config:
+            self.load_model_from_experiment(model, self.config["load_model_from_exp"])
         return model
 
     def train(self, model):
@@ -383,8 +386,8 @@ class Runner:
         # return LambdaLR(optimizer, [lr_lambda_bert, lr_lambda_bert, lr_lambda_task, lr_lambda_task])
 
     def save_model_checkpoint(self, model, step):
-        if step < 30000:
-            return  # Debug
+        # if step < 30000:
+        #     return  # Debug
         path_ckpt = join(self.config['log_dir'], f'model_{self.name_suffix}_{step}.bin')
         torch.save(model.state_dict(), path_ckpt)
         logger.info('Saved model to %s' % path_ckpt)
@@ -396,9 +399,27 @@ class Runner:
         logger.info('Loaded model from %s' % path_ckpt)
 
 
+    def load_model_from_experiment(self, model, experiment_name):
+        config = util.initialize_config(experiment_name)
+        dir = config["log_dir"]
+        import glob
+        models = glob.glob(join(dir, '*model_*'))
+        models.sort(key=cmp_to_key(compare_models))
+        model.load_state_dict(torch.load(models[-1], map_location=torch.device('cpu')), strict=False)
+
+def compare_models(m1, m2):
+    split1 = m1.split("/")[-1].split("_")
+    split2 = m2.split("/")[-1].split("_")
+    d1 = datetime.strptime(split1[1] + "_" + split1[2], '%b%d_%H-%M-%S')
+    d2 = datetime.strptime(split2[1] + "_" + split2[2], '%b%d_%H-%M-%S')
+    if d1 == d2:
+        return 1 if split1[3] > split2[3] else -1
+    else:
+        return 1 if d1 > d2 else -1
+
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
-    runner = Runner(config_name, gpu_id)
+    runner = Runner(config_name, None)
     model = runner.initialize_model()
 
     runner.train(model)
