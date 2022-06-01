@@ -154,27 +154,38 @@ class DocumentState(object):
     def finalize_from_udapi(self, udapi_doc):
         """ Extract clusters; fill other info e.g. speakers, pronouns """
         # Populate speakers from info
+        heads = {}
+        final_heads = {}
+        parents = []
+        deprels = []
         subtoken_idx = 0
         for seg_info in self.segment_info:
             speakers = []
+            subdeprels = []
             for i, subtoken_info in enumerate(seg_info):
                 if i == 0 or i == len(seg_info) - 1:
                     speakers.append('[SPL]')
+                    subdeprels.append("<UNK>")
                 elif subtoken_info is not None:  # First subtoken of each word
                     speakers.append("SPEAKER1")
+                    subdeprels.append(subtoken_info[-2])
                 else:
                     speakers.append(speakers[-1])
+                    subdeprels.append(subdeprels[-1])
                 subtoken_idx += 1
             self.speakers += [speakers]
+            deprels += [subdeprels]
 
         # Populate cluster
         first_subtoken_idx = 0  # Subtoken idx across segments
         subtokens_info = util.flatten(self.segment_info)
-        for word in udapi_doc.nodes_and_empty:
+        word2subword = {}
+        for word_index, word in enumerate(udapi_doc.nodes_and_empty):
             while subtokens_info[first_subtoken_idx] is None:
                 first_subtoken_idx += 1
             subtoken_info = subtokens_info[first_subtoken_idx]
             corefs = word.coref_mentions
+            word2subword[word_index] = first_subtoken_idx
             if word.ord != subtoken_info[0]:
                 print("fd")
                 pass
@@ -184,14 +195,18 @@ class DocumentState(object):
                     if "," in part.span:
                         continue    # Skip discontinuous mentions
                     cluster_id = part.entity.eid
+                    if part.head == word:
+                        heads[word.ord] = first_subtoken_idx
                     if part.span.split("-")[0] == str(word.ord):
                         if part.span.split("-")[-1] == str(word.ord):
                             self.clusters[cluster_id].append((first_subtoken_idx, last_subtoken_idx))
+                            final_heads[str(first_subtoken_idx) + "-" + str(last_subtoken_idx)] = first_subtoken_idx
                         else:
                             self.coref_stacks[cluster_id].append(first_subtoken_idx)
                     elif part.span.split("-")[-1] == str(word.ord):
                         start = self.coref_stacks[cluster_id].pop()
                         self.clusters[cluster_id].append((start, last_subtoken_idx))
+                        final_heads[str(start) + "-" + str(last_subtoken_idx)] = heads[part.head.ord]
             first_subtoken_idx += 1
 
         # Merge clusters if any clusters have common mentions
@@ -216,6 +231,25 @@ class DocumentState(object):
         sentence_map = get_sentence_map(self.segments, self.sentence_end)
         subtoken_map = util.flatten(self.segment_subtoken_map)
 
+
+        udapi_words = list(udapi_doc.nodes_and_empty)
+        word_index = 0
+        parents = []
+        for seg_info in self.segment_info:
+            subparents = []
+            for i, subtoken_info in enumerate(seg_info):
+                if i == 0 or i == len(seg_info) - 1:
+                    subparents.append(-1)
+                elif subtoken_info is not None:  # First subtoken of each word
+                    parent = udapi_words[word_index].parent
+                    if parent is None or parent.form == "<ROOT>":
+                        subparents.append(-1)
+                    else:
+                        subparents.append(word2subword[udapi_words.index(parent)])
+                    word_index += 1
+                else:
+                    subparents.append(subparents[-1])
+            parents += [subparents]
         # Sanity check
         # assert len(all_mentions) == len(set(all_mentions))  # Each mention unique
         # Below should have length: # all subtokens with CLS, SEP in all segments
@@ -234,7 +268,10 @@ class DocumentState(object):
             "clusters": merged_clusters,
             'sentence_map': sentence_map,
             "subtoken_map": subtoken_map,
-            'pronouns': self.pronouns
+            'pronouns': self.pronouns,
+            "parents": parents,
+            "deprels": deprels,
+            "heads": final_heads
         }
 
 
@@ -289,7 +326,7 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
         document_state.token_end += [False] * (len(subtokens) - 1) + [True]
         for idx, subtoken in enumerate(subtokens):
             document_state.subtokens.append(subtoken)
-            info = None if idx != 0 else ([node.ord] + [node.form] + [len(subtokens)])
+            info = None if idx != 0 else ([node.ord] + [node.form] + [node.parent] + [node.udeprel] + [len(subtokens)])
             document_state.info.append(info)
             document_state.sentence_end.append(False)
             document_state.subtoken_map.append(word_idx)
@@ -314,7 +351,7 @@ def minimize_partition(partition, extension, args, tokenizer):
 
     # Write documents
     with open(output_path, 'w') as output_file:
-        if args.joined_languages is not None:
+        if "joined_languages" in args:
             udapi_documents = []
             for i in range(len(args.joined_languages)):
                 input_path = os.path.join(args.joined_dirs[i], f'{args.joined_languages[i]}-{partition}.{extension}')
