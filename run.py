@@ -48,8 +48,8 @@ def evaluate_coreud(gold_path, pred_path):
     process.wait()
 
     stdout = stdout.decode("utf-8")
-    if stderr is not None:
-        logger.error(stderr)
+    # if stderr is not None:
+    #     logger.error(stderr)
     logger.info("Official result for {}".format(pred_path))
     logger.info(stdout)
     import re
@@ -65,8 +65,8 @@ def evaluate_coreud(gold_path, pred_path):
     process.wait()
 
     stdout = stdout.decode("utf-8")
-    if stderr is not None:
-        logger.error(stderr)
+    # if stderr is not None:
+    #     logger.error(stderr)
     logger.info("Official result with singletons for {}".format(pred_path))
     logger.info(stdout)
     result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
@@ -220,19 +220,19 @@ class Runner:
         logger.info('**********Dev eval**********')
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
         logger.info('**********Test eval**********')
-        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions.conllu"))
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=True, phase="test")
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=join(self.config['log_dir'], self.name_suffix + "_predictions-best.conllu"), phase="best_model_eval")
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_eval")
         # Wrap up
         tb_writer.close()
         return loss_history
 
-    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=None, phase="eval"):
+    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
         if isinstance(conll_path, list):
             for path in self.config['conll_test_path']:
-                self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer)
+                self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer, save_predictions, phase)
             return 0.0, None
         model.to(self.device)
         evaluator = CorefEvaluator()
@@ -278,8 +278,9 @@ class Runner:
         if official:
             udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(conll_path), doc_to_prediction, stored_info['subtoken_maps'])
 
-            if save_predictions is not None:
-                fd = open(save_predictions, "wt", encoding="utf-8")
+            if save_predictions:
+                path = join(self.config['log_dir'], self.name_suffix + "_pred_" + phase + "_" + conll_path.split("/")[-1])
+                fd = open(path, "wt", encoding="utf-8")
             else:
                 fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
             udapi_io.write_data(udapi_docs, fd)
@@ -419,7 +420,7 @@ def compare_models(m1, m2):
 
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
-    runner = Runner(config_name, None)
+    runner = Runner(config_name, gpu_id)
     model = runner.initialize_model()
 
     runner.train(model)
