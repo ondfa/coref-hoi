@@ -242,7 +242,7 @@ class Runner:
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             gold_clusters = stored_info['gold'][doc_key]
-            tensor_example = tensor_example[:7]  # Strip out gold
+            tensor_example = tensor_example[:9]  # Strip out gold
             num_sentences = tensor_example[0].shape[0]
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
@@ -308,7 +308,7 @@ class Runner:
         predicted_spans, predicted_antecedents, predicted_clusters = [], [], []
 
         for i, tensor_example in enumerate(tensor_examples):
-            tensor_example = tensor_example[:7]
+            tensor_example = tensor_example[:9]
             example_gpu = [d.to(self.device) for d in tensor_example]
             with torch.no_grad():
                 _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores = model(*example_gpu)
