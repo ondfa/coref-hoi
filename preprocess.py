@@ -314,7 +314,7 @@ def minimize_partition(partition, extension, args, tokenizer):
 
     # Write documents
     with open(output_path, 'w') as output_file:
-        if args.joined_languages is not None:
+        if "joined_languages" in args:
             udapi_documents = []
             for i in range(len(args.joined_languages)):
                 input_path = os.path.join(args.joined_dirs[i], f'{args.joined_languages[i]}-{partition}.{extension}')
@@ -337,7 +337,7 @@ def minimize_language(args):
     # minimize_partition('train', 'v4_gold_conll', args, tokenizer)
 
 
-    # minimize_partition('test', 'conllu', args, tokenizer)
+    minimize_partition('test', 'conllu', args, tokenizer)
     minimize_partition('dev', 'conllu', args, tokenizer)
     minimize_partition('train', 'conllu', args, tokenizer)
 
