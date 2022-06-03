@@ -23,6 +23,7 @@ import conll
 import sys
 import tensorflow as tf
 import os
+import shutil
 from functools import cmp_to_key
 
 tf.config.set_visible_devices([], 'GPU')
@@ -132,7 +133,7 @@ class Runner:
         logger.info('Tensorboard summary path: %s' % tb_path)
 
         # Set up data
-        examples_train, examples_dev = self.data.get_tensor_examples()
+        examples_train, examples_dev, examples_test = self.data.get_tensor_examples()
         stored_info = self.data.get_stored_info()
 
         # Set up optimizer and scheduler
@@ -220,11 +221,15 @@ class Runner:
         logger.info('**********Dev eval**********')
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
         logger.info('**********Test eval**********')
+        #TODO test data eval
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=True, phase="test")
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_eval")
+            logger.info('**********Dev eval**********')
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_dev_path'], save_predictions=True, phase="best_model_eval")
+            logger.info('**********Test eval**********')
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_test")
         # Wrap up
         tb_writer.close()
         return loss_history
@@ -290,8 +295,9 @@ class Runner:
             metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
             metrics[phase + "_" + dataset + "_corefud_score"] = score
             metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
+            if save_predictions and self.config["final_path"]:
+                shutil.copyfile(fd.name, os.path.join(self.config["final_path"], conll_path.split("/")[-1]))
             fd.close()
-
         for name, score in metrics.items():
             logger.info('%s: %.2f' % (name, score))
             wandb.run.summary[name] = score
@@ -404,7 +410,7 @@ class Runner:
         config = util.initialize_config(experiment_name)
         dir = config["log_dir"]
         import glob
-        models = glob.glob(join(dir, '*model_*'))
+        models = glob.glob(join(dir, 'model_*'))
         models.sort(key=cmp_to_key(compare_models))
         model.load_state_dict(torch.load(models[-1], map_location=torch.device('cpu')), strict=False)
 
