@@ -133,7 +133,7 @@ class Runner:
         logger.info('Tensorboard summary path: %s' % tb_path)
 
         # Set up data
-        examples_train, examples_dev = self.data.get_tensor_examples()
+        examples_train, examples_dev, examples_test = self.data.get_tensor_examples()
         stored_info = self.data.get_stored_info()
 
         # Set up optimizer and scheduler
@@ -221,11 +221,15 @@ class Runner:
         logger.info('**********Dev eval**********')
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
         logger.info('**********Test eval**********')
+        #TODO test data eval
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=True, phase="test")
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
-            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_eval")
+            logger.info('**********Dev eval**********')
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_dev_path'], save_predictions=True, phase="best_model_eval")
+            logger.info('**********Test eval**********')
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_test")
         # Wrap up
         tb_writer.close()
         return loss_history
