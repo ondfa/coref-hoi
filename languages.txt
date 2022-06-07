@@ -1,0 +1,13 @@
+french
+czech
+czech-pcedt
+russian
+polish
+german
+german-parcor
+spanish
+catalan
+hungarian
+lithuanian
+english-gum
+english-parcor
