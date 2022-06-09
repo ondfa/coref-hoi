@@ -53,8 +53,8 @@ class CorefDataProcessor:
 
     @classmethod
     def convert_to_torch_tensor(cls, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
-                                parents, deprel_ids, heads,
-                                is_training, gold_starts, gold_ends, gold_mention_cluster_map):
+                                is_training, parents, deprel_ids, heads,
+                                gold_starts, gold_ends, gold_mention_cluster_map):
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         input_mask = torch.tensor(input_mask, dtype=torch.long)
         speaker_ids = torch.tensor(speaker_ids, dtype=torch.long)
@@ -69,8 +69,8 @@ class CorefDataProcessor:
         gold_ends = torch.tensor(gold_ends, dtype=torch.long)
         gold_mention_cluster_map = torch.tensor(gold_mention_cluster_map, dtype=torch.long)
         return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, \
-               parents, deprel_ids, heads, \
-               is_training, gold_starts, gold_ends, gold_mention_cluster_map,
+               is_training, parents, deprel_ids, heads, \
+               gold_starts, gold_ends, gold_mention_cluster_map,
 
     def get_tensor_examples(self):
         # For each split, return list of tensorized samples to allow variable length input (batch size = 1)

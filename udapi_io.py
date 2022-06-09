@@ -16,7 +16,7 @@ def write_data(docs, f):
     # writer.after_process_document(None)
 
 
-def map_to_udapi(udapi_docs, predictions, subtoken_map):
+def map_to_udapi(udapi_docs, predictions, subtoken_map, doc_span_to_head=None):
     entities = 1
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
     docs = []
@@ -31,9 +31,15 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
         for mentions in clusters:
             entity = doc.create_coref_entity(eid="e" + str(entities))
             entities += 1
-            for start, end in mentions:
-                start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
-                entity.create_mention(words=udapi_words[start: end + 1])
+            for i, (start, end) in enumerate(mentions):
+                if doc_span_to_head and doc_key in doc_span_to_head:
+                    heads = doc_span_to_head[doc_key][str(start) + "-" + str(end)]
+                    heads = [subtoken_map[doc_key][start + head] for head in heads]
+                    head_words = [udapi_words[head] for head in heads]
+                    entity.create_mention(words=head_words)
+                else:
+                    start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
+                    entity.create_mention(words=udapi_words[start: end + 1])
         udapi.core.coref.store_coref_to_misc(doc)
         docs.append(doc)
     return docs

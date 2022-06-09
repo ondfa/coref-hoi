@@ -65,7 +65,8 @@ class CorefModel(nn.Module):
         self.gate_ffnn = self.make_ffnn(2 * self.span_emb_size, 0, output_size=self.span_emb_size) if config['coref_depth'] > 1 else None
         self.span_attn_ffnn = self.make_ffnn(self.span_emb_size, 0, output_size=1) if config['higher_order'] == 'span_clustering' else None
         self.cluster_score_ffnn = self.make_ffnn(3 * self.span_emb_size + config['feature_emb_size'], [config['cluster_ffnn_size']] * config['ffnn_depth'], output_size=1) if config['higher_order'] == 'cluster_merging' else None
-
+        if config["span2head"]:
+            self.span2head_ffnn = self.make_ffnn(self.span_emb_size, config["ffnn_size"], output_size=self.max_span_width)
         self.update_steps = 0  # Internal use for debug
         self.debug = True
 
@@ -108,8 +109,8 @@ class CorefModel(nn.Module):
         return self.get_predictions_and_loss(*input)
 
     def get_predictions_and_loss(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
-                                 parents, deprel_ids, heads,
-                                 is_training, gold_starts=None, gold_ends=None, gold_mention_cluster_map=None):
+                                 is_training, parents, deprel_ids, heads,
+                                 gold_starts=None, gold_ends=None, gold_mention_cluster_map=None):
         """ Model and input are already on the device """
         device = self.device
         conf = self.config
@@ -129,8 +130,11 @@ class CorefModel(nn.Module):
 
         # Get candidate span
         sentence_indices = sentence_map  # [num tokens]
-        candidate_starts = torch.unsqueeze(torch.arange(0, num_words, device=device), 1).repeat(1, self.max_span_width)
-        candidate_ends = candidate_starts + torch.arange(0, self.max_span_width, device=device)
+        if conf["heads_only"]:
+            candidate_starts = candidate_ends = torch.arange(0, num_words, device=device)
+        else:
+            candidate_starts = torch.unsqueeze(torch.arange(0, num_words, device=device), 1).repeat(1, self.max_span_width)
+            candidate_ends = candidate_starts + torch.arange(0, self.max_span_width, device=device)
         candidate_start_sent_idx = sentence_indices[candidate_starts]
         candidate_end_sent_idx = sentence_indices[torch.min(candidate_ends, torch.tensor(num_words - 1, device=device))]
         candidate_mask = (candidate_ends < num_words) & (candidate_start_sent_idx == candidate_end_sent_idx)
@@ -139,11 +143,17 @@ class CorefModel(nn.Module):
 
         # Get candidate labels
         if do_loss:
-            same_start = (torch.unsqueeze(gold_starts, 1) == torch.unsqueeze(candidate_starts, 0))
-            same_end = (torch.unsqueeze(gold_ends, 1) == torch.unsqueeze(candidate_ends, 0))
-            same_span = (same_start & same_end).to(torch.long)
+            if conf["heads_only"]:
+                same_span = (torch.unsqueeze(gold_starts, 1) == torch.unsqueeze(heads, 0)).to(torch.long)
+            else:
+                same_start = (torch.unsqueeze(gold_starts, 1) == torch.unsqueeze(candidate_starts, 0))
+                same_end = (torch.unsqueeze(gold_ends, 1) == torch.unsqueeze(candidate_ends, 0))
+                same_span = (same_start & same_end).to(torch.long)
             candidate_labels = torch.matmul(torch.unsqueeze(gold_mention_cluster_map, 0).to(torch.float), same_span.to(torch.float))
             candidate_labels = torch.squeeze(candidate_labels.to(torch.long), 0)  # [num candidates]; non-gold span has label 0
+            if conf["span2head"]:
+                candidate_span_heads = torch.matmul(torch.unsqueeze(heads + 1, 0).to(torch.float), same_span.to(torch.float))
+                candidate_span_heads = torch.squeeze(candidate_span_heads.to(torch.long), 0)
 
         # Get span embedding
         span_start_emb, span_end_emb = mention_doc[candidate_starts], mention_doc[candidate_ends]
@@ -182,6 +192,12 @@ class CorefModel(nn.Module):
         selected_idx = torch.tensor(selected_idx_cpu, device=device)
         top_span_starts, top_span_ends = candidate_starts[selected_idx], candidate_ends[selected_idx]
         top_span_emb = candidate_span_emb[selected_idx]
+        if conf["span2head"]:
+            span2head_logits = self.span2head_ffnn(top_span_emb)
+            if do_loss:
+                top_span_heads = candidate_span_heads[selected_idx]
+        else:
+            span2head_logits = None
         top_span_cluster_ids = candidate_labels[selected_idx] if do_loss else None
         top_span_mention_scores = candidate_mention_scores[selected_idx]
 
@@ -269,7 +285,8 @@ class CorefModel(nn.Module):
             if conf['fine_grained'] and conf['higher_order'] == 'cluster_merging':
                 top_pairwise_scores += cluster_merging_scores
             top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1)  # [num top spans, max top antecedents + 1]
-            return candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedent_idx, top_antecedent_scores
+            return candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedent_idx, top_antecedent_scores, span2head_logits
+
 
         # Get gold labels
         top_antecedent_cluster_ids = top_span_cluster_ids[top_antecedent_idx]
@@ -319,7 +336,11 @@ class CorefModel(nn.Module):
                 loss += loss_cm
             else:
                 loss = loss_cm
-
+        if conf["span2head"]:
+            top_span_head_offsets = top_span_heads - top_span_starts - 1
+            top_span_head_offsets[top_span_head_offsets < 0] = -100
+            loss_fn = nn.BCELoss()
+            loss += loss_fn(torch.sigmoid(span2head_logits[top_span_head_offsets >= 0, :]), one_hot(top_span_head_offsets[top_span_head_offsets >= 0], span2head_logits.size(dim=1), self.device))
         # Debug
         if self.debug:
             if self.update_steps % 20 == 0:
@@ -340,7 +361,7 @@ class CorefModel(nn.Module):
                 wandb.log(metrics)
         self.update_steps += 1
 
-        return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedent_idx, top_antecedent_scores], loss
+        return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedent_idx, top_antecedent_scores, span2head_logits], loss
 
     def _extract_top_spans(self, candidate_idx_sorted, candidate_starts, candidate_ends, num_top_spans):
         """ Keep top non-cross-overlapping candidates ordered by scores; compute on CPU because of loop """
@@ -414,6 +435,26 @@ class CorefModel(nn.Module):
         predicted_clusters = [tuple(c) for c in predicted_clusters]
         return predicted_clusters, mention_to_cluster_id, predicted_antecedents
 
+    def get_mention2head_map(self, span_starts, span_ends, heads, mention2head_map=None):
+        if mention2head_map is None:
+            mention2head_map = {}
+        for start, end, head in zip(span_starts, span_ends, heads):
+            mention2head_map[str(start) + "-" + str(end)] = head
+        return mention2head_map
+
+    def predict_heads(self, span_starts, span_ends, head_logits):
+        heads_binary = sigmoid(head_logits) > .5
+        valid_head_mask = torch.zeros_like(heads_binary) + torch.unsqueeze(torch.arange(heads_binary.size(-1)), 0).to(self.device)
+        valid_head_mask = valid_head_mask <= torch.unsqueeze(span_ends - span_starts, -1)
+        heads_binary &= valid_head_mask  # discard heads out of span
+        no_head = torch.logical_not(torch.any(heads_binary, dim=1))
+        # heads_binary[no_head, :] = one_hot(np.argmax(head_logits)[no_head, :], np.shape(head_logits)[-1]) # maximum where no head is predicted
+        heads_binary[no_head, 0] = 1  # first word where no head is predicted
+        # heads_binary[no_head, :] = 1  # all words where no head is predicted
+        heads = [list(np.where(row)[0]) for row in heads_binary.cpu().numpy()]
+        return heads
+
+
     def update_evaluator(self, span_starts, span_ends, antecedent_idx, antecedent_scores, gold_clusters, evaluator):
         predicted_clusters, mention_to_cluster_id, _ = self.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
         return self.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
@@ -424,3 +465,14 @@ class CorefModel(nn.Module):
         mention_to_gold = {m: cluster for cluster in gold_clusters for m in cluster}
         evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
         return predicted_clusters
+
+
+def sigmoid(x):
+    return 1 / (1 + torch.exp(-x))
+
+
+def one_hot(a, num_classes, device, ignore_index=-100):
+    a[a == ignore_index] = -1
+    e = torch.cat([torch.zeros(1, num_classes), torch.eye(num_classes)], dim=0).to(device)
+    return e[torch.flatten(a + 1)]
+

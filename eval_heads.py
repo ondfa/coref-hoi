@@ -2,6 +2,7 @@ import sys
 import os
 import util
 import udapi_io
+import sentencepiece as spm
 
 
 def eval_heads(config):

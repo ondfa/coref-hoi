@@ -242,12 +242,13 @@ class Runner:
         model.to(self.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
+        doc_span_to_head = {}
 
         model.eval()
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             gold_clusters = stored_info['gold'][doc_key]
-            tensor_example = tensor_example[:9]  # Strip out gold
+            tensor_example = tensor_example[:10]  # Strip out gold
             num_sentences = tensor_example[0].shape[0]
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
@@ -255,16 +256,20 @@ class Runner:
                 batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example)
             predicted_clusters = []
             mention_to_cluster_id = {}
+            span_to_head = {}
             for j, example in enumerate(batch_examples):
                 example_gpu = [d.to(self.device) for d in example]
                 with torch.no_grad():
-                    _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores = model(*example_gpu)
+                    _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
                     sentence_len = tensor_example[3]
                     offset = j * max_sentences
                     word_offset = sentence_len[:offset].sum()
                     span_starts = span_starts + word_offset
                     span_ends = span_ends + word_offset
                 example_gpu = [e.detach().cpu() for e in example_gpu]
+                if span2head_logits is not None:
+                    heads = model.predict_heads(span_starts, span_ends, span2head_logits)
+                    model.get_mention2head_map(span_starts.tolist(), span_ends.tolist(), heads, span_to_head)
                 span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
                 antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
                 tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
@@ -274,6 +279,8 @@ class Runner:
             if self.config["filter_singletons"]:
                 predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters
+            if span2head_logits is not None:
+                doc_span_to_head[doc_key] = span_to_head
         dataset = conll_path.split("/")[-1].split("-")[0]
         p, r, f = evaluator.get_prf()
         metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100}
@@ -281,7 +288,7 @@ class Runner:
         metrics[phase + "_" + dataset + "_Avg_Recall"] = r * 100
         metrics[phase + "_" + dataset + "_Avg_F1"] = f * 100
         if official:
-            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(conll_path), doc_to_prediction, stored_info['subtoken_maps'])
+            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(conll_path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head)
 
             if save_predictions:
                 path = join(self.config['log_dir'], self.name_suffix + "_pred_" + phase + "_" + conll_path.split("/")[-1])
