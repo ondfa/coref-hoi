@@ -181,6 +181,7 @@ class Tensorizer:
         deprels_tensor = np.array(deprels_tensor)
         assert num_words == np.sum(input_mask), (num_words, np.sum(input_mask))
 
+
         # Keep info to store
         doc_key = example['doc_key']
         self.stored_info['subtoken_maps'][doc_key] = example.get('subtoken_map', None)
@@ -190,6 +191,10 @@ class Tensorizer:
         # Construct example
         genre = self.stored_info['genre_dict'].get(doc_key[:2], 0)
         gold_starts, gold_ends = self._tensorize_spans(gold_mentions)
+        # assert np.all(heads >= gold_starts)
+        # assert np.all(heads <= gold_ends)
+        # TODO for some languages heads are out of span
+        assert input_mask.shape == input_ids.shape == speaker_ids.shape
         example_tensor = (input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
                           parents_tensor, deprels_tensor, heads,
                           gold_starts, gold_ends, gold_mention_cluster_map)
@@ -200,7 +205,7 @@ class Tensorizer:
             return doc_key, example_tensor
 
     def truncate_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
-                         parents, deprels, heads,#TODO
+                         parents, deprels, heads=None,
                          gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
         max_sentences = self.config["max_training_sentences"]
         num_sentences = input_ids.shape[0]
@@ -217,7 +222,6 @@ class Tensorizer:
         speaker_ids = speaker_ids[sent_offset: sent_offset + max_sentences, :]
         parents = parents[sent_offset: sent_offset + max_sentences, :]
         deprels = deprels[sent_offset: sent_offset + max_sentences, :]
-        speaker_ids = speaker_ids[sent_offset: sent_offset + max_sentences, :]
         sentence_len = sentence_len[sent_offset: sent_offset + max_sentences]
 
         sentence_map = sentence_map[word_offset: word_offset + num_words]
@@ -233,7 +237,7 @@ class Tensorizer:
                is_training, parents, deprels, heads, gold_starts, gold_ends, gold_mention_cluster_map
 
     def split_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
-                      parents, deprels, heads,
+                      parents, deprels, heads=None,
                       gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         num_sentences = input_ids.shape[0]

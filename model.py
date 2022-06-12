@@ -66,7 +66,10 @@ class CorefModel(nn.Module):
         self.span_attn_ffnn = self.make_ffnn(self.span_emb_size, 0, output_size=1) if config['higher_order'] == 'span_clustering' else None
         self.cluster_score_ffnn = self.make_ffnn(3 * self.span_emb_size + config['feature_emb_size'], [config['cluster_ffnn_size']] * config['ffnn_depth'], output_size=1) if config['higher_order'] == 'cluster_merging' else None
         if config["span2head"]:
-            self.span2head_ffnn = self.make_ffnn(self.span_emb_size, config["ffnn_size"], output_size=self.max_span_width)
+            if config["span2head_binary"]:
+                self.span2head_ffnn = self.make_ffnn(self.span_emb_size + self.bert_emb_size, config["ffnn_size"], output_size=1)
+            else:
+                self.span2head_ffnn = self.make_ffnn(self.span_emb_size, config["ffnn_size"], output_size=self.max_span_width)
         self.update_steps = 0  # Internal use for debug
         self.debug = True
 
@@ -109,7 +112,7 @@ class CorefModel(nn.Module):
         return self.get_predictions_and_loss(*input)
 
     def get_predictions_and_loss(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
-                                 is_training, parents, deprel_ids, heads,
+                                 is_training, parents, deprel_ids, heads=None,
                                  gold_starts=None, gold_ends=None, gold_mention_cluster_map=None):
         """ Model and input are already on the device """
         device = self.device
@@ -144,7 +147,7 @@ class CorefModel(nn.Module):
         # Get candidate labels
         if do_loss:
             if conf["heads_only"]:
-                same_span = (torch.unsqueeze(gold_starts, 1) == torch.unsqueeze(heads, 0)).to(torch.long)
+                same_span = (torch.unsqueeze(heads, 1) == torch.unsqueeze(candidate_starts, 0)).to(torch.long)
             else:
                 same_start = (torch.unsqueeze(gold_starts, 1) == torch.unsqueeze(candidate_starts, 0))
                 same_end = (torch.unsqueeze(gold_ends, 1) == torch.unsqueeze(candidate_ends, 0))
@@ -193,7 +196,16 @@ class CorefModel(nn.Module):
         top_span_starts, top_span_ends = candidate_starts[selected_idx], candidate_ends[selected_idx]
         top_span_emb = candidate_span_emb[selected_idx]
         if conf["span2head"]:
-            span2head_logits = self.span2head_ffnn(top_span_emb)
+            if conf["span2head_binary"]:
+                head_absolute_position = torch.unsqueeze(top_span_starts, 1).repeat(1, self.max_span_width) + torch.unsqueeze(torch.arange(self.max_span_width), 0).to(self.device)
+                valid_head_mask = head_absolute_position <= torch.unsqueeze(top_span_ends, -1)
+                span2head_embedding = torch.unsqueeze(top_span_emb, 1).repeat(1, self.max_span_width, 1)
+                head_embedding = torch.zeros(num_top_spans, self.max_span_width, self.bert_emb_size).to(self.device)
+                head_embedding[valid_head_mask] = mention_doc[head_absolute_position[valid_head_mask]]
+                span2head_embedding = torch.cat([span2head_embedding, head_embedding], -1)
+            else:
+                span2head_embedding = top_span_emb
+            span2head_logits = torch.squeeze(self.span2head_ffnn(span2head_embedding))
             if do_loss:
                 top_span_heads = candidate_span_heads[selected_idx]
         else:
@@ -336,11 +348,18 @@ class CorefModel(nn.Module):
                 loss += loss_cm
             else:
                 loss = loss_cm
+        span2head_loss = 0.0
+        gold_heads = 0
+        gold_heads2 = 0
         if conf["span2head"]:
             top_span_head_offsets = top_span_heads - top_span_starts - 1
             top_span_head_offsets[top_span_head_offsets < 0] = -100
             loss_fn = nn.BCELoss()
-            loss += loss_fn(torch.sigmoid(span2head_logits[top_span_head_offsets >= 0, :]), one_hot(top_span_head_offsets[top_span_head_offsets >= 0], span2head_logits.size(dim=1), self.device))
+            if torch.any(top_span_head_offsets >= 0):
+                span2head_loss = 1000 * loss_fn(torch.sigmoid(span2head_logits[top_span_head_offsets >= 0, :]), one_hot(top_span_head_offsets[top_span_head_offsets >= 0], span2head_logits.size(dim=1), self.device))
+                loss += span2head_loss
+                gold_heads = (top_span_heads > 0).sum()
+                gold_heads2 = (top_span_head_offsets >= 0).sum()
         # Debug
         if self.debug:
             if self.update_steps % 20 == 0:
@@ -358,6 +377,10 @@ class CorefModel(nn.Module):
                 else:
                     logger.info('loss: %.4f' % loss)
                     metrics["loss"] = loss
+                if conf["span2head"]:
+                    logger.info("span2head loss: %.4f" % span2head_loss)
+                    metrics["span2head_loss"] = span2head_loss
+                    logger.info("Number of gold heads: %d, %d" % (gold_heads, gold_heads2))
                 wandb.log(metrics)
         self.update_steps += 1
 
@@ -443,14 +466,19 @@ class CorefModel(nn.Module):
         return mention2head_map
 
     def predict_heads(self, span_starts, span_ends, head_logits):
-        heads_binary = sigmoid(head_logits) > .5
-        valid_head_mask = torch.zeros_like(heads_binary) + torch.unsqueeze(torch.arange(heads_binary.size(-1)), 0).to(self.device)
+        valid_head_mask = torch.zeros_like(head_logits) + torch.unsqueeze(torch.arange(head_logits.size(-1)), 0).to(self.device)
         valid_head_mask = valid_head_mask <= torch.unsqueeze(span_ends - span_starts, -1)
-        heads_binary &= valid_head_mask  # discard heads out of span
+        head_logits[torch.logical_not(valid_head_mask)] = -np.inf  # discard heads out of span
+        heads_binary = sigmoid(head_logits) > .5
+        # heads_binary = torch.zeros_like(head_logits).to(torch.bool)
         no_head = torch.logical_not(torch.any(heads_binary, dim=1))
-        # heads_binary[no_head, :] = one_hot(np.argmax(head_logits)[no_head, :], np.shape(head_logits)[-1]) # maximum where no head is predicted
-        heads_binary[no_head, 0] = 1  # first word where no head is predicted
-        # heads_binary[no_head, :] = 1  # all words where no head is predicted
+        if torch.any(no_head):
+            if self.conf["span2head_fallback"] == "best":
+                heads_binary[no_head, :] = one_hot(torch.argmax(head_logits[no_head, :], dim=1), head_logits.size()[-1], self.device).to(torch.bool)  # maximum where no head is predicted
+            else if self.conf["span2head_fallback"] == "first":
+                heads_binary[no_head, 0] = 1  # first word where no head is predicted
+            else:
+                heads_binary += valid_head_mask * torch.unsqueeze(no_head, dim=1)  # all words where no head is predicted
         heads = [list(np.where(row)[0]) for row in heads_binary.cpu().numpy()]
         return heads
 
