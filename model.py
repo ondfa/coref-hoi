@@ -475,7 +475,7 @@ class CorefModel(nn.Module):
         if torch.any(no_head):
             if self.conf["span2head_fallback"] == "best":
                 heads_binary[no_head, :] = one_hot(torch.argmax(head_logits[no_head, :], dim=1), head_logits.size()[-1], self.device).to(torch.bool)  # maximum where no head is predicted
-            else if self.conf["span2head_fallback"] == "first":
+            elif self.conf["span2head_fallback"] == "first":
                 heads_binary[no_head, 0] = 1  # first word where no head is predicted
             else:
                 heads_binary += valid_head_mask * torch.unsqueeze(no_head, dim=1)  # all words where no head is predicted
