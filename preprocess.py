@@ -9,6 +9,7 @@ from transformers import BertTokenizer, AutoTokenizer
 import conll
 import util
 import udapi_io
+import numpy as np
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO)
@@ -43,8 +44,10 @@ def get_sentence_map(segments, sentence_end):
 
 
 class DocumentState(object):
-    def __init__(self, key):
+    def __init__(self, key, path_length: int = 5):
         self.doc_key = key
+        self.path_length = path_length
+
         self.tokens = []
 
         # Linear list mapped to subtokens without CLS, SEP
@@ -234,6 +237,7 @@ class DocumentState(object):
 
         udapi_words = list(udapi_doc.nodes_and_empty)
         word_index = 0
+        offset = 0
         parents = []
         for seg_info in self.segment_info:
             subparents = []
@@ -249,7 +253,21 @@ class DocumentState(object):
                     word_index += 1
                 else:
                     subparents.append(subparents[-1])
-            parents += [subparents]
+
+            ###### convert parents to paths
+            subparents = np.array(subparents)
+
+            # -1 to offset to enable indexing
+            subparents[subparents == -1] = offset
+
+            superparents = subparents
+            tree_path = superparents
+            for i in range(self.path_length-1):
+                superparents = superparents[superparents-offset]
+                tree_path = np.row_stack((tree_path, superparents))
+
+            parents += [tree_path]
+            offset = len(seg_info)
         # Sanity check
         # assert len(all_mentions) == len(set(all_mentions))  # Each mention unique
         # Below should have length: # all subtokens with CLS, SEP in all segments
