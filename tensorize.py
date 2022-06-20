@@ -96,7 +96,7 @@ class Tensorizer:
         self.stored_info['subtoken_maps'] = {}  # {doc_key: ...}; mapping back to tokens
         self.stored_info['gold'] = {}  # {doc_key: ...}
         self.stored_info['genre_dict'] = {genre: idx for idx, genre in enumerate(config['genres'])}
-        self.stored_info['deprels_dict'] = {} if "deprels" not in config else config["deprels"]
+        self.stored_info['deprels_dict'] = {} if "deprels" not in config else {deprel: i for i, deprel in enumerate(config["deprels"])}
 
 
     def _tensorize_spans(self, spans):
