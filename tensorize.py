@@ -168,7 +168,8 @@ class Tensorizer:
                 sent_input_mask.append(0)
                 sent_speaker_ids.append(0)
                 sent_deprel_ids.append(0)
-                sent_parents.append(-1)
+                for par in sent_parents:
+                    par.append(-1)
             input_ids.append(sent_input_ids)
             input_mask.append(sent_input_mask)
             speaker_ids.append(sent_speaker_ids)
