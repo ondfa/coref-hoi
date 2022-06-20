@@ -21,17 +21,19 @@ from torch.optim.lr_scheduler import LambdaLR
 from model import CorefModel
 import conll
 import sys
-import tensorflow as tf
+# import tensorflow as tf
 import os
 import shutil
 from functools import cmp_to_key
 
-tf.config.set_visible_devices([], 'GPU')
+# tf.config.set_visible_devices([], 'GPU')
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger()
+
+os.environ['WANDB_DISABLED'] = 'true'
 
 WANDB_API_KEY_DIR = 'wandb_private/wandbkey.txt'
 
@@ -106,7 +108,7 @@ class Runner:
         os.environ["WANDB_API_KEY"] = wandb_api_key
         os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
         import wandb
-        wandb.init(project="coref-multiling", entity="ondfa", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
+        wandb.init(project="coref-multiling", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
 
     def initialize_model(self, saved_suffix=None):
         model = CorefModel(self.config, self.device)
@@ -165,7 +167,7 @@ class Runner:
                 # Forward pass
                 model.train()
                 example_gpu = [d.to(self.device) for d in example]
-                torch.cuda.empty_cache()
+                torch.cuda.empty_cache
                 _, loss = model(*example_gpu)
 
                 # Backward; accumulate gradients and clip by grad norm

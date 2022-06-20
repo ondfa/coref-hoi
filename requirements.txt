@@ -1,8 +1,10 @@
-torch==1.4.0
-torchvision==0.5.0
-transformers==2.4.1
+torch
+torchvision
+transformers
 numpy
-scikit-learn==0.22.1
+scikit-learn==0.22.2
 pyhocon
 graphviz
 tensorboard
+wandb
+udapi
