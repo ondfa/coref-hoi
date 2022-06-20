@@ -24,7 +24,7 @@ class CorefDataProcessor:
 
         # Get tensorized samples
         cache_path = self.get_cache_path()
-        if os.path.exists(cache_path):
+        if os.path.exists(cache_path) and config['use_cache']:
             # Load cached tensors if exists
             with open(cache_path, 'rb') as f:
                 self.tensor_samples, self.stored_info = pickle.load(f)
@@ -40,7 +40,7 @@ class CorefDataProcessor:
             }
             for split, path in paths.items():
                 logger.info('Tensorizing examples from %s; results will be cached)' % path)
-                is_training = (split == 'trn')
+                is_training = (split == 'trn') or (split == 'dev' and config['add_dev_to_train'])
                 with open(path, 'r') as f:
                     samples = [json.loads(line) for line in f.readlines()]
                 print(util.count_singletons(samples))

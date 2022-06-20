@@ -134,6 +134,8 @@ class Runner:
 
         # Set up data
         examples_train, examples_dev, examples_test = self.data.get_tensor_examples()
+        if conf["add_dev_to_train"]:
+            examples_train.extend(examples_dev)
         stored_info = self.data.get_stored_info()
 
         # Set up optimizer and scheduler

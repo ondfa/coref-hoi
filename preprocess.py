@@ -367,7 +367,7 @@ def minimize_partition(partition, extension, args, tokenizer):
 
 
 def minimize_language(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name, force_download=True)
 
     # minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
     # minimize_partition('test', 'v4_gold_conll', args, tokenizer)
