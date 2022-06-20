@@ -269,8 +269,8 @@ class DocumentState(object):
             # mask invalid position with -1
             tree_path[tree_path == offset] = -1
 
-            parents += [tree_path]
-            offset = len(seg_info)
+            parents += [tree_path.tolist()]
+            offset += len(seg_info)
         # Sanity check
         # assert len(all_mentions) == len(set(all_mentions))  # Each mention unique
         # Below should have length: # all subtokens with CLS, SEP in all segments
