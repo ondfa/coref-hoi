@@ -261,11 +261,11 @@ class DocumentState(object):
             subparents[subparents == -1] = offset
 
             superparents = subparents
+            superparents[(superparents < offset) | (superparents >= len(seg_info)+offset)] = 0
+
             tree_path = superparents
             for i in range(self.path_length-1):
-                #a[(a < 0) | (a > 2)] = 0
-                superparents[(superparents < offset) | (superparents >= len(seg_info)+offset)] = 0
-
+                superparents = superparents[superparents-offset]
                 tree_path = np.row_stack((tree_path, superparents))
 
             # mask invalid position with -1
