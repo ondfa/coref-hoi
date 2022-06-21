@@ -261,7 +261,7 @@ class DocumentState(object):
             subparents[subparents == -1] = offset
 
             superparents = subparents
-            superparents[(superparents < offset) | (superparents >= len(seg_info)+offset)] = 0
+            superparents[(superparents < offset) | (superparents >= len(seg_info)+offset)] = offset
 
             tree_path = superparents
             for i in range(self.path_length-1):
@@ -390,7 +390,7 @@ def minimize_partition(partition, extension, args, tokenizer):
 
 
 def minimize_language(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name, force_download=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name)
 
     # minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
     # minimize_partition('test', 'v4_gold_conll', args, tokenizer)
