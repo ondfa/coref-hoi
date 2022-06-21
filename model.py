@@ -38,6 +38,10 @@ class CorefModel(nn.Module):
         self.span_emb_size = self.bert_emb_size * 3
         if config['use_features']:
             self.span_emb_size += config['feature_emb_size']
+        if config['use_trees']:
+            self.trees_output_size = self.bert_emb_size
+            # self.span_emb_size += self.trees_output_size
+
         self.pair_emb_size = self.span_emb_size * 3
         if config['use_metadata']:
             self.pair_emb_size += 2 * config['feature_emb_size']
@@ -45,6 +49,7 @@ class CorefModel(nn.Module):
             self.pair_emb_size += config['feature_emb_size']
         if config['use_segment_distance']:
             self.pair_emb_size += config['feature_emb_size']
+
 
         self.emb_span_width = self.make_embedding(self.max_span_width) if config['use_features'] else None
         self.emb_span_width_prior = self.make_embedding(self.max_span_width) if config['use_width_prior'] else None
@@ -54,6 +59,7 @@ class CorefModel(nn.Module):
         self.emb_segment_distance = self.make_embedding(config['max_training_sentences']) if config['use_segment_distance'] else None
         self.emb_top_antecedent_distance = self.make_embedding(10)
         self.emb_cluster_size = self.make_embedding(10) if config['higher_order'] == 'cluster_merging' else None
+        self.emb_deprels = self.make_embedding(len(config['deprels'])) if config['use_trees'] else None
 
         self.mention_token_attn = self.make_ffnn(self.bert_emb_size, 0, output_size=1) if config['model_heads'] else None
         self.span_emb_score_ffnn = self.make_ffnn(self.span_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1)
@@ -61,6 +67,8 @@ class CorefModel(nn.Module):
         self.coarse_bilinear = self.make_ffnn(self.span_emb_size, 0, output_size=self.span_emb_size)
         self.antecedent_distance_score_ffnn = self.make_ffnn(config['feature_emb_size'], 0, output_size=1) if config['use_distance_prior'] else None
         self.coref_score_ffnn = self.make_ffnn(self.pair_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1) if config['fine_grained'] else None
+
+        self.trees_ffnn = self.make_ffnn((self.bert_emb_size + config["feature_emb_size"]) * config['tree_path_length'], [], output_size=self.trees_output_size) if config['use_trees'] else None
 
         self.gate_ffnn = self.make_ffnn(2 * self.span_emb_size, 0, output_size=self.span_emb_size) if config['coref_depth'] > 1 else None
         self.span_attn_ffnn = self.make_ffnn(self.span_emb_size, 0, output_size=1) if config['higher_order'] == 'span_clustering' else None
@@ -157,6 +165,28 @@ class CorefModel(nn.Module):
             if conf["span2head"]:
                 candidate_span_heads = torch.matmul(torch.unsqueeze(heads + 1, 0).to(torch.float), same_span.to(torch.float))
                 candidate_span_heads = torch.squeeze(candidate_span_heads.to(torch.long), 0)
+
+        if conf['use_trees']:
+            deprel_ids = deprel_ids[input_mask]
+
+            deprels_emb = self.emb_deprels(deprel_ids.to(torch.long))
+            deprels_emb_ext = torch.row_stack((deprels_emb, torch.zeros_like(deprels_emb[0])))
+
+            parents = torch.transpose(parents, 1, 2)[input_mask]
+            mention_doc_ext = torch.row_stack((mention_doc, torch.zeros_like(mention_doc[0])))
+            parents[parents == -1] = mention_doc.size(0)
+
+            deprel_path = deprels_emb_ext[parents]
+            token_path = mention_doc_ext[parents]
+
+            deprel_path = torch.cat((torch.unsqueeze(deprels_emb, 1), deprel_path[:,0:-1,:]), dim=1)
+
+            path_emb = torch.cat((deprel_path, token_path), dim=-1)
+
+            tree_repr = self.trees_ffnn(path_emb.view(num_words, -1))
+
+            mention_doc = mention_doc + tree_repr
+
 
         # Get span embedding
         span_start_emb, span_end_emb = mention_doc[candidate_starts], mention_doc[candidate_ends]

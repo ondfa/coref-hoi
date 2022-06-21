@@ -100,7 +100,7 @@ class Runner:
             util.set_seed(seed)
 
         # Set up device
-        self.device = torch.device('cpu' if gpu_id is None else f'cuda:{gpu_id}')
+        self.device = torch.device('cpu' if gpu_id < 0 else f'cuda:{gpu_id}')
 
         # Set up data
         self.data = CorefDataProcessor(self.config, language=self.config.language)
