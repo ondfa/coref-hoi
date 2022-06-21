@@ -269,7 +269,7 @@ class DocumentState(object):
                 tree_path = np.row_stack((tree_path, superparents))
 
             # mask invalid position with -1
-            tree_path[tree_path == 0] = -1
+            tree_path[tree_path == offset] = -1
 
             parents += [tree_path.tolist()]
             offset += len(seg_info)
