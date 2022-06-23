@@ -33,7 +33,7 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     level=logging.INFO)
 logger = logging.getLogger()
 
-os.environ['WANDB_DISABLED'] = 'true'
+# os.environ['WANDB_DISABLED'] = 'true'
 
 WANDB_API_KEY_DIR = 'wandb_private/wandbkey.txt'
 
