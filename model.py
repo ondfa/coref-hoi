@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel
@@ -15,6 +17,56 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     level=logging.INFO)
 logger = logging.getLogger()
 
+
+
+def create_positional_embeddings_random(smaller_embeddings, larger_embeddings):
+    target_size = larger_embeddings.size()[0]
+    return torch.cat((smaller_embeddings, torch.rand([target_size - smaller_embeddings.size()[0], smaller_embeddings.size()[1]])))
+
+def create_positional_embeddings_repeated(smaller_embeddings, larger_embeddings):
+    target_size = larger_embeddings.size()[0]
+    ret = torch.zeros([target_size, smaller_embeddings.size()[1]])
+    i = 0
+    for index in range(0, target_size, smaller_embeddings.size()[0]):
+        length = min(smaller_embeddings.size()[0], ret.size()[0] - index)
+        ret[index: index + length, :] = smaller_embeddings[:length, :]
+        i += 1
+    return ret
+
+def create_positional_embeddings_lin_proj(smaller_embeddings, larger_embeddings):
+    mapping_embeddings = larger_embeddings[:smaller_embeddings.size()[0], :]
+    transformation_matrix = torch.matmul(torch.matmul(torch.pinverse(torch.matmul(mapping_embeddings.T, mapping_embeddings)), mapping_embeddings.T), smaller_embeddings)
+    return torch.matmul(larger_embeddings, transformation_matrix)
+
+def create_positional_embeddings_original(smaller_embeddings, larger_embeddings):
+    return larger_embeddings
+
+def average_models(original_weights, new_weights):
+    ret = {}
+    count = len(original_weights.keys())
+    i = 0
+    for name in original_weights.keys():
+        if name not in new_weights:
+            continue
+        if original_weights[name].size() == new_weights[name].size():
+            ret[name] = (i/count) * new_weights[name] + (1 - i/count) * original_weights[name]
+        else:
+            ret[name] = original_weights[name]
+        i += 1
+    ret["embeddings.position_ids"] = original_weights["embeddings.position_ids"]
+    ret["embeddings.word_embeddings.weight"] = original_weights["embeddings.word_embeddings.weight"]
+    ret["embeddings.position_embeddings.weight"] = original_weights["embeddings.position_embeddings.weight"]
+    ret["embeddings.token_type_embeddings.weight"] = original_weights["embeddings.token_type_embeddings.weight"]
+    ret["embeddings.LayerNorm.weight"] = original_weights["embeddings.LayerNorm.weight"]
+    ret["embeddings.LayerNorm.bias"] = original_weights["embeddings.LayerNorm.bias"]
+
+    return ret
+
+
+
+positional_mapping_types = {"random": create_positional_embeddings_random, "repeated": create_positional_embeddings_repeated, "linproj": create_positional_embeddings_lin_proj, "original": create_positional_embeddings_original}
+
+
 class CorefModel(nn.Module):
     def __init__(self, config, device, num_genres=None):
         super().__init__()
@@ -31,8 +83,35 @@ class CorefModel(nn.Module):
         # Model
         self.dropout = nn.Dropout(p=config['dropout_rate'])
         bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'])
+        model = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
         bert_config.return_dict = False
-        self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
+        if "bert_weights_name" in config:
+            bert_config.max_position_embeddings = config["max_segment_len"] + 2
+            weights_config = AutoConfig.from_pretrained(config["bert_weights_name"])
+            bert_config.vocab_size = weights_config.vocab_size
+            bert_config.type_vocab_size = weights_config.type_vocab_size
+            # weights_config.max_position_embeddings = config["max_segment_len"]
+            weightsModel = AutoModel.from_pretrained(config['bert_weights_name'], from_tf=config["from_tf"], config=weights_config)
+            state_dict = weightsModel.state_dict()
+            model_state_dict = model.state_dict()
+            if weights_config.max_position_embeddings < bert_config.max_position_embeddings:
+                # state_dict["embeddings.position_embeddings.weight"] = torch.cat((state_dict["embeddings.position_embeddings.weight"], torch.rand([bert_config.max_position_embeddings - weights_config.max_position_embeddings, weights_config.hidden_size])))
+                state_dict["embeddings.position_embeddings.weight"] = positional_mapping_types[config["positional_mapping_type"]](state_dict["embeddings.position_embeddings.weight"], model_state_dict["embeddings.position_embeddings.weight"])[:bert_config.max_position_embeddings,:]
+                # state_dict["embeddings.position_embeddings.weight"] = create_positional_embeddings_lin_proj(state_dict["embeddings.position_embeddings.weight"], model_state_dict["embeddings.position_embeddings.weight"])
+                state_dict["embeddings.position_ids"] = torch.tensor(range(0, bert_config.max_position_embeddings)).reshape([1, bert_config.max_position_embeddings])
+            self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=state_dict)
+        else:
+            self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
+
+
+        if "combine_with" in config:
+            new_config = AutoConfig.from_pretrained(config['combine_with'])
+            new_config.return_dict = False
+            new_model = AutoModel.from_pretrained(config['combine_with'], from_tf=config["from_tf"], config=new_config)
+            new_state_dict = new_model.state_dict()
+            old_state_dict = self.bert.state_dict()
+            new_state_dict = average_models(old_state_dict, new_state_dict)
+            self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=new_state_dict)
 
         self.bert_emb_size = self.bert.config.hidden_size
         self.span_emb_size = self.bert_emb_size * 3
@@ -50,7 +129,6 @@ class CorefModel(nn.Module):
         if config['use_segment_distance']:
             self.pair_emb_size += config['feature_emb_size']
 
-
         self.emb_span_width = self.make_embedding(self.max_span_width) if config['use_features'] else None
         self.emb_span_width_prior = self.make_embedding(self.max_span_width) if config['use_width_prior'] else None
         self.emb_antecedent_distance_prior = self.make_embedding(10) if config['use_distance_prior'] else None
@@ -63,13 +141,17 @@ class CorefModel(nn.Module):
 
         self.mention_token_attn = self.make_ffnn(self.bert_emb_size, 0, output_size=1) if config['model_heads'] else None
         self.span_emb_score_ffnn = self.make_ffnn(self.span_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1)
+        if config['separate_singletons']:
+            self.singletons_span_emb_score_ffnn = self.make_ffnn(self.span_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1)
+            self.singletons_coref_score_ffnn = self.make_ffnn(self.pair_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1) if config['fine_grained'] else None
         self.span_width_score_ffnn = self.make_ffnn(config['feature_emb_size'], [config['ffnn_size']] * config['ffnn_depth'], output_size=1) if config['use_width_prior'] else None
         self.coarse_bilinear = self.make_ffnn(self.span_emb_size, 0, output_size=self.span_emb_size)
         self.antecedent_distance_score_ffnn = self.make_ffnn(config['feature_emb_size'], 0, output_size=1) if config['use_distance_prior'] else None
         self.coref_score_ffnn = self.make_ffnn(self.pair_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1) if config['fine_grained'] else None
 
+        if config["model_singletons"]:
+            self.singleton_embedding = self.make_embedding(1, emb_size=self.span_emb_size)
         self.trees_ffnn = self.make_ffnn((self.bert_emb_size + config["feature_emb_size"]) * config['tree_path_length'], [], output_size=self.trees_output_size) if config['use_trees'] else None
-
         self.gate_ffnn = self.make_ffnn(2 * self.span_emb_size, 0, output_size=self.span_emb_size) if config['coref_depth'] > 1 else None
         self.span_attn_ffnn = self.make_ffnn(self.span_emb_size, 0, output_size=1) if config['higher_order'] == 'span_clustering' else None
         self.cluster_score_ffnn = self.make_ffnn(3 * self.span_emb_size + config['feature_emb_size'], [config['cluster_ffnn_size']] * config['ffnn_depth'], output_size=1) if config['higher_order'] == 'cluster_merging' else None
@@ -81,8 +163,10 @@ class CorefModel(nn.Module):
         self.update_steps = 0  # Internal use for debug
         self.debug = True
 
-    def make_embedding(self, dict_size, std=0.02):
-        emb = nn.Embedding(dict_size, self.config['feature_emb_size'])
+    def make_embedding(self, dict_size, std=0.02, emb_size=None):
+        if emb_size == None:
+            emb_size = self.config['feature_emb_size']
+        emb = nn.Embedding(dict_size, emb_size)
         init.normal_(emb.weight, std=std)
         return emb
 
@@ -160,6 +244,18 @@ class CorefModel(nn.Module):
                 same_start = (torch.unsqueeze(gold_starts, 1) == torch.unsqueeze(candidate_starts, 0))
                 same_end = (torch.unsqueeze(gold_ends, 1) == torch.unsqueeze(candidate_ends, 0))
                 same_span = (same_start & same_end).to(torch.long)
+            #TODO add gold labels for singletons - probably do not
+            if conf["model_singletons"]:
+                same_cluster = torch.unsqueeze(gold_mention_cluster_map, 0) == torch.unsqueeze(gold_mention_cluster_map, 1)
+                self.singletons = gold_mention_cluster_map[torch.squeeze(torch.sum(same_cluster, 1)) == 1]
+                # mentions = gold_mention_cluster_map.detach().numpy()
+                # mentions_counts = {}
+                # for mention in mentions:
+                #     if mention not in mentions_counts:
+                #         mentions_counts[mention] = 1
+                #     else:
+                #         mentions_counts[mention] += 1
+                # self.singletons = torch.tensor([k for k,v in mentions_counts.items() if v == 1]).to(self.device)
             candidate_labels = torch.matmul(torch.unsqueeze(gold_mention_cluster_map, 0).to(torch.float), same_span.to(torch.float))
             candidate_labels = torch.squeeze(candidate_labels.to(torch.long), 0)  # [num candidates]; non-gold span has label 0
             if conf["span2head"]:
@@ -243,16 +339,30 @@ class CorefModel(nn.Module):
             span2head_logits = None
         top_span_cluster_ids = candidate_labels[selected_idx] if do_loss else None
         top_span_mention_scores = candidate_mention_scores[selected_idx]
-
+        if conf["model_singletons"]:
+            top_span_emb = torch.cat([top_span_emb, torch.unsqueeze(self.singleton_embedding(torch.tensor(0, device=device)), 0)], 0)
+            top_span_mention_scores = torch.cat([top_span_mention_scores, torch.tensor([0], device=device)], 0)
+            if top_span_cluster_ids is not None:
+                top_span_cluster_ids = torch.cat([top_span_cluster_ids, torch.tensor([-100], device=device)], 0)
         # Coarse pruning on each mention's antecedents
         max_top_antecedents = min(num_top_spans, conf['max_top_antecedents'])
+        if conf["model_singletons"]:
+            num_top_spans += 1
         top_span_range = torch.arange(0, num_top_spans, device=device)
         antecedent_offsets = torch.unsqueeze(top_span_range, 1) - torch.unsqueeze(top_span_range, 0)
-        antecedent_mask = (antecedent_offsets >= 1)
+        antecedent_mask = (antecedent_offsets >= 1) #Mask to triangular matrix
+        if conf["model_singletons"]:
+            antecedent_mask[:, -1] = True
         pairwise_mention_score_sum = torch.unsqueeze(top_span_mention_scores, 1) + torch.unsqueeze(top_span_mention_scores, 0)
+        # TODO no nekam sem pridat embedding pro virtualni entecedent
         source_span_emb = self.dropout(self.coarse_bilinear(top_span_emb))
         target_span_emb = self.dropout(torch.transpose(top_span_emb, 0, 1))
         pairwise_coref_scores = torch.matmul(source_span_emb, target_span_emb)
+        if conf["model_singletons"] and conf["mask_singleton_binary_score"]:
+            singleton_mask = torch.ones_like(pairwise_coref_scores)
+            singleton_mask[-1, :] = 0
+            singleton_mask[:, -1] = 0
+            pairwise_coref_scores = pairwise_coref_scores * singleton_mask
         pairwise_fast_scores = pairwise_mention_score_sum + pairwise_coref_scores
         pairwise_fast_scores += torch.log(antecedent_mask.to(torch.float))
         if conf['use_distance_prior']:
@@ -260,6 +370,15 @@ class CorefModel(nn.Module):
             bucketed_distance = util.bucket_distance(antecedent_offsets)
             antecedent_distance_score = distance_score[bucketed_distance]
             pairwise_fast_scores += antecedent_distance_score
+        if conf["model_singletons"]:
+            num_top_spans -= 1
+            antecedent_mask = antecedent_mask[:-1,:]
+            pairwise_fast_scores = pairwise_fast_scores[:-1,:]
+            antecedent_offsets = antecedent_offsets[:-1,:]
+            if conf["separate_singletons"]:
+                pairwise_fast_scores[:, -1] += torch.squeeze(self.singletons_span_emb_score_ffnn(candidate_span_emb[selected_idx, :]), 1)
+
+
         top_pairwise_fast_scores, top_antecedent_idx = torch.topk(pairwise_fast_scores, k=max_top_antecedents)
         top_antecedent_mask = util.batch_select(antecedent_mask, top_antecedent_idx, device)  # [num top spans, max top antecedents]
         top_antecedent_offsets = util.batch_select(antecedent_offsets, top_antecedent_idx, device)
@@ -268,9 +387,15 @@ class CorefModel(nn.Module):
         if conf['fine_grained']:
             same_speaker_emb, genre_emb, seg_distance_emb, top_antecedent_distance_emb = None, None, None, None
             if conf['use_metadata']:
+                if conf["model_singletons"]:
+                    top_span_starts = torch.cat([top_span_starts, torch.tensor([0], device=device)], 0)
                 top_span_speaker_ids = speaker_ids[top_span_starts]
                 top_antecedent_speaker_id = top_span_speaker_ids[top_antecedent_idx]
+                if conf["model_singletons"]:
+                    top_antecedent_speaker_id = torch.cat([top_antecedent_speaker_id, -1 * torch.ones([1, max_top_antecedents], device=device)], 0)
                 same_speaker = torch.unsqueeze(top_span_speaker_ids, 1) == top_antecedent_speaker_id
+                if conf["model_singletons"]:
+                    same_speaker = same_speaker[:-1,:]
                 same_speaker_emb = self.emb_same_speaker(same_speaker.to(torch.long))
                 genre_emb = self.emb_genre(genre)
                 genre_emb = torch.unsqueeze(torch.unsqueeze(genre_emb, 0), 0).repeat(num_top_spans, max_top_antecedents, 1)
@@ -280,8 +405,12 @@ class CorefModel(nn.Module):
                 token_seg_ids = token_seg_ids[input_mask]
                 top_span_seg_ids = token_seg_ids[top_span_starts]
                 top_antecedent_seg_ids = token_seg_ids[top_span_starts[top_antecedent_idx]]
+                if conf["model_singletons"]:
+                    top_antecedent_seg_ids = torch.cat([top_antecedent_seg_ids, torch.zeros([1, max_top_antecedents], dtype=torch.long, device=device)], 0)
                 top_antecedent_seg_distance = torch.unsqueeze(top_span_seg_ids, 1) - top_antecedent_seg_ids
                 top_antecedent_seg_distance = torch.clamp(top_antecedent_seg_distance, 0, self.config['max_training_sentences'] - 1)
+                if conf["model_singletons"]:
+                    top_antecedent_seg_distance = top_antecedent_seg_distance[:-1,:]
                 seg_distance_emb = self.emb_segment_distance(top_antecedent_seg_distance)
             if conf['use_features']:  # Antecedent distance
                 top_antecedent_distance = util.bucket_distance(top_antecedent_offsets)
@@ -298,11 +427,17 @@ class CorefModel(nn.Module):
                 if conf['use_features']:  # Antecedent distance
                     feature_list.append(top_antecedent_distance_emb)
                 feature_emb = torch.cat(feature_list, dim=2)
+                if conf["model_singletons"]:
+                    top_span_emb = top_span_emb[:-1, :]
                 feature_emb = self.dropout(feature_emb)
                 target_emb = torch.unsqueeze(top_span_emb, 1).repeat(1, max_top_antecedents, 1)
                 similarity_emb = target_emb * top_antecedent_emb
                 pair_emb = torch.cat([target_emb, top_antecedent_emb, similarity_emb, feature_emb], 2)
                 top_pairwise_slow_scores = torch.squeeze(self.coref_score_ffnn(pair_emb), 2)
+                if conf['separate_singletons']:
+                    top_pairwise_slow_scores[top_antecedent_idx == top_pairwise_slow_scores.shape[0]] += torch.squeeze(self.singletons_coref_score_ffnn(pair_emb), 2)[top_antecedent_idx == top_pairwise_slow_scores.shape[0]]
+                if conf["model_singletons"] and conf["mask_singleton_binary_score"]:
+                    top_pairwise_slow_scores[top_antecedent_idx == top_pairwise_slow_scores.shape[0]] = 0
                 top_pairwise_scores = top_pairwise_slow_scores + top_pairwise_fast_scores
                 if conf['higher_order'] == 'cluster_merging':
                     cluster_merging_scores = ho.cluster_merging(top_span_emb, top_antecedent_idx, top_pairwise_scores, self.emb_cluster_size, self.cluster_score_ffnn, None, self.dropout,
@@ -321,6 +456,8 @@ class CorefModel(nn.Module):
                     gate = self.gate_ffnn(torch.cat([top_span_emb, refined_span_emb], dim=1))
                     gate = torch.sigmoid(gate)
                     top_span_emb = gate * refined_span_emb + (1 - gate) * top_span_emb  # [num top spans, span emb size]
+            if conf["model_singletons"]:
+                top_span_starts = top_span_starts[:-1]
         else:
             top_pairwise_scores = top_pairwise_fast_scores  # [num top spans, max top antecedents]
 
@@ -332,11 +469,31 @@ class CorefModel(nn.Module):
 
 
         # Get gold labels
+
         top_antecedent_cluster_ids = top_span_cluster_ids[top_antecedent_idx]
+        if conf["model_singletons"]:
+            if conf["subtract_best_from_singleton"]:
+                non_singleton_scores = torch.clone(top_pairwise_scores)
+                non_singleton_scores[top_antecedent_idx == top_pairwise_scores.shape[0]] = 0
+                top_pairwise_scores[top_antecedent_idx == top_pairwise_scores.shape[0]] -= torch.maximum(torch.max(non_singleton_scores, 1)[0][torch.max(top_antecedent_idx, 1)[0] == top_pairwise_scores.shape[0]], torch.tensor(0))
+            if top_span_cluster_ids is not None:
+                top_span_cluster_ids = top_span_cluster_ids[:-1]
+            singletons_mask = torch.squeeze((torch.unsqueeze(top_span_cluster_ids, 0) == torch.unsqueeze(self.singletons, 1)).any(0))
+            # sigleton_gold_labels = (top_antecedent_cluster_ids == -100) & torch.unsqueeze(singletons_mask[top_span_cluster_ids >= 0], 1)
+            sigleton_gold_labels = (top_antecedent_cluster_ids == -100)
+            if not conf["model_mentions"]:
+                sigleton_gold_labels &= torch.unsqueeze(singletons_mask, 1)
+            else:
+                sigleton_gold_labels &= torch.unsqueeze(top_span_cluster_ids > 0, 1)
         top_antecedent_cluster_ids += (top_antecedent_mask.to(torch.long) - 1) * 100000  # Mask id on invalid antecedents
         same_gold_cluster_indicator = (top_antecedent_cluster_ids == torch.unsqueeze(top_span_cluster_ids, 1))
         non_dummy_indicator = torch.unsqueeze(top_span_cluster_ids > 0, 1)
         pairwise_labels = same_gold_cluster_indicator & non_dummy_indicator
+        if conf["model_singletons"]:
+            pairwise_labels = pairwise_labels | sigleton_gold_labels
+            # pairwise_labels = top_antecedent_cluster_ids == -100
+            if top_span_cluster_ids is not None:
+                top_span_cluster_ids = torch.cat([top_span_cluster_ids, torch.tensor([-100], device=device)], 0)
         dummy_antecedent_labels = torch.logical_not(pairwise_labels.any(dim=1, keepdims=True))
         top_antecedent_gold_labels = torch.cat([dummy_antecedent_labels, pairwise_labels], dim=1)
 
@@ -465,14 +622,29 @@ class CorefModel(nn.Module):
     def get_predicted_clusters(self, span_starts, span_ends, antecedent_idx, antecedent_scores):
         """ CPU list input """
         # Get predicted antecedents
+        antecedent_scores = np.array(antecedent_scores)
+        # antecedent_scores[np.concatenate([np.zeros([np.shape(antecedent_scores)[0], 1], dtype=np.bool), np.array(antecedent_idx) == len(antecedent_idx)], axis=1)] = 1000000
         predicted_antecedents = self.get_predicted_antecedents(antecedent_idx, antecedent_scores)
-
+        if self.config["model_mentions"]:
+            altered_scores = np.copy(antecedent_scores)
+            altered_scores[torch.cat((-100 * torch.ones([len(antecedent_idx), 1]), torch.tensor(antecedent_idx)), 1) == len(antecedent_idx)] = -math.inf
+            predicted_antecedents_without_mentions = self.get_predicted_antecedents(antecedent_idx, altered_scores)
         # Get predicted clusters
         mention_to_cluster_id = {}
         predicted_clusters = []
         for i, predicted_idx in enumerate(predicted_antecedents):
             if predicted_idx < 0:
                 continue
+            if predicted_idx == len(antecedent_idx):
+                if not self.config["model_mentions"] or predicted_antecedents_without_mentions[i] < 0:
+                    cluster_id = len(predicted_clusters)
+                    mention = (int(span_starts[i]), int(span_ends[i]))
+                    predicted_clusters.append([mention])
+                    mention_to_cluster_id[mention] = cluster_id
+                    continue
+                else:
+                    predicted_idx = predicted_antecedents_without_mentions[i]
+
             assert i > predicted_idx, f'span idx: {i}; antecedent idx: {predicted_idx}'
             # Check antecedent's cluster
             antecedent = (int(span_starts[predicted_idx]), int(span_ends[predicted_idx]))
