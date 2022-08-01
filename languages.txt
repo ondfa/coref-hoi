@@ -11,3 +11,5 @@ hungarian
 lithuanian
 english-gum
 english-parcor
+multi_slavic
+multi_all
