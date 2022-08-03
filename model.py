@@ -217,7 +217,7 @@ class CorefModel(nn.Module):
             do_loss = True
 
         # Get token emb
-        mention_doc, _ = self.bert(input_ids, attention_mask=input_mask)  # [num seg, num max tokens, emb size]
+        mention_doc = self.bert(input_ids, attention_mask=input_mask)[0]  # [num seg, num max tokens, emb size]
         input_mask = input_mask.to(torch.bool)
         mention_doc = mention_doc[input_mask]
         speaker_ids = speaker_ids[input_mask]
@@ -269,7 +269,7 @@ class CorefModel(nn.Module):
             deprels_emb_ext = torch.cat((deprels_emb, torch.zeros([1, deprels_emb.size(1)]).to(device)))
 
             parents = torch.transpose(parents, 1, 2)[input_mask]
-            parents[(parents < 0) | (parents > num_words)] = num_words
+            # parents[(parents < 0) | (parents > num_words)] = num_words
             mention_doc_ext = torch.cat((mention_doc, torch.zeros([1, mention_doc.size(1)]).to(device)))
             parents[parents == -1] = mention_doc.size(0)
 
@@ -500,9 +500,25 @@ class CorefModel(nn.Module):
         # Get loss
         top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1) # pridava score pro dummy
         if conf['loss_type'] == 'marginalized':
-            log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
-            log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
-            loss = torch.sum(log_norm - log_marginalized_antecedent_scores)
+            if conf["model_mentions"]:
+                mention_scores = top_pairwise_scores[top_antecedent_idx == top_pairwise_scores.shape[0]]
+                mention_scores = torch.stack((mention_scores, -mention_scores), dim=1)
+                mention_gold_scores = pairwise_labels.to(torch.float)[top_antecedent_idx == top_pairwise_scores.shape[0]]
+                mention_gold_scores = torch.stack((torch.log(mention_gold_scores), torch.log(1 - mention_gold_scores)), dim=1)
+                top_pairwise_scores[top_antecedent_idx == top_pairwise_scores.shape[0]] = -math.inf
+                pairwise_labels[top_antecedent_idx == top_pairwise_scores.shape[0]] = False
+                dummy_antecedent_labels = torch.logical_not(pairwise_labels.any(dim=1, keepdims=True))
+                top_antecedent_gold_labels = torch.cat([dummy_antecedent_labels, pairwise_labels], dim=1)
+                top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1) # pridava score pro dummy
+                log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
+                log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
+                loss = torch.sum(log_norm - log_marginalized_antecedent_scores)
+                loss += torch.sum(torch.logsumexp(mention_scores, dim=1) - torch.logsumexp(mention_scores + mention_gold_scores, dim=1))
+            else:
+                log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
+                log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
+                loss = torch.sum(log_norm - log_marginalized_antecedent_scores)
+
         elif conf['loss_type'] == 'hinge':
             top_antecedent_mask = torch.cat([torch.ones(num_top_spans, 1, dtype=torch.bool, device=device), top_antecedent_mask], dim=1)
             top_antecedent_scores += torch.log(top_antecedent_mask.to(torch.float))

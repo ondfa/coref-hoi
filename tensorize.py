@@ -222,6 +222,7 @@ class Tensorizer:
         input_mask = input_mask[sent_offset: sent_offset + max_sentences, :]
         speaker_ids = speaker_ids[sent_offset: sent_offset + max_sentences, :]
         parents = parents[sent_offset: sent_offset + max_sentences, :]
+        parents[parents >= 0] -= word_offset
         deprels = deprels[sent_offset: sent_offset + max_sentences, :]
         sentence_len = sentence_len[sent_offset: sent_offset + max_sentences]
 
