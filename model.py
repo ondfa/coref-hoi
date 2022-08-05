@@ -269,9 +269,9 @@ class CorefModel(nn.Module):
             deprels_emb_ext = torch.cat((deprels_emb, torch.zeros([1, deprels_emb.size(1)]).to(device)))
 
             parents = torch.transpose(parents, 1, 2)[input_mask]
-            # parents[(parents < 0) | (parents > num_words)] = num_words
+            parents[(parents < 0) | (parents > num_words)] = num_words
             mention_doc_ext = torch.cat((mention_doc, torch.zeros([1, mention_doc.size(1)]).to(device)))
-            parents[parents == -1] = mention_doc.size(0)
+            # parents[parents == -1] = mention_doc.size(0)
 
             deprel_path = deprels_emb_ext[parents]
             token_path = mention_doc_ext[parents]

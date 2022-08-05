@@ -1,3 +1,4 @@
+import argparse
 import logging
 import random
 import subprocess
@@ -89,6 +90,16 @@ class Runner:
 
         # Set up config
         self.config = util.initialize_config(config_name)
+
+        self.parser = argparse.ArgumentParser()
+        self.parser.add_argument("experiment_name")
+        self.parser.add_argument("gpu_id")
+        for key, value in self.config.items():
+            action = "store_true" if type(value) == bool else "store"
+            self.parser.add_argument("--" + key, default=value, action=action)
+        for key, value in vars(self.parser.parse_args()).items():
+            if key in self.config:
+                self.config[key] = value
 
         # Set up logger
         log_path = join(self.config['log_dir'], 'log_' + self.name_suffix + '.txt')
@@ -231,7 +242,7 @@ class Runner:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
             logger.info('**********Dev eval**********')
-            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_dev_path'], save_predictions=True, phase="best_model_eval")
+            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_eval_path'], save_predictions=True, phase="best_model_eval")
             logger.info('**********Test eval**********')
             self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_test")
         # Wrap up
