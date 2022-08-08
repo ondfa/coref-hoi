@@ -1,3 +1,8 @@
+import os
+# os.environ['WANDB_DISABLED'] = 'true'
+os.environ["LC_ALL"] = "C.UTF-8"
+os.environ["LANG"] = "C.UTF-8"
+
 import argparse
 import logging
 import random
@@ -23,7 +28,7 @@ from model import CorefModel
 import conll
 import sys
 # import tensorflow as tf
-import os
+
 import shutil
 from functools import cmp_to_key
 
@@ -33,8 +38,6 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger()
-
-# os.environ['WANDB_DISABLED'] = 'true'
 
 WANDB_API_KEY_DIR = 'wandb_private/wandbkey.txt'
 

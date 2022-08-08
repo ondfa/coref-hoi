@@ -151,7 +151,7 @@ class CorefModel(nn.Module):
 
         if config["model_singletons"]:
             self.singleton_embedding = self.make_embedding(1, emb_size=self.span_emb_size)
-        self.trees_ffnn = self.make_ffnn((self.bert_emb_size + config["feature_emb_size"]) * config['tree_path_length'], [], output_size=self.trees_output_size) if config['use_trees'] else None
+        self.trees_ffnn = self.make_ffnn((self.bert_emb_size + config["feature_emb_size"]) * config['tree_path_length'], config["tree_ffnn_size"], output_size=self.trees_output_size) if config['use_trees'] else None
         self.gate_ffnn = self.make_ffnn(2 * self.span_emb_size, 0, output_size=self.span_emb_size) if config['coref_depth'] > 1 else None
         self.span_attn_ffnn = self.make_ffnn(self.span_emb_size, 0, output_size=1) if config['higher_order'] == 'span_clustering' else None
         self.cluster_score_ffnn = self.make_ffnn(3 * self.span_emb_size + config['feature_emb_size'], [config['cluster_ffnn_size']] * config['ffnn_depth'], output_size=1) if config['higher_order'] == 'cluster_merging' else None
