@@ -1,5 +1,7 @@
 import os
 # os.environ['WANDB_DISABLED'] = 'true'
+import requests
+
 os.environ["LC_ALL"] = "C.UTF-8"
 os.environ["LANG"] = "C.UTF-8"
 
@@ -98,8 +100,10 @@ class Runner:
         self.parser.add_argument("experiment_name")
         self.parser.add_argument("gpu_id")
         for key, value in self.config.items():
-            action = "store_true" if type(value) == bool else "store"
-            self.parser.add_argument("--" + key, default=value, action=action)
+            if type(value) == bool:
+                self.parser.add_argument("--" + key, default=value, action="store_true")
+            else:
+                self.parser.add_argument("--" + key, default=value, type=type(value))
         for key, value in vars(self.parser.parse_args()).items():
             if key in self.config:
                 self.config[key] = value
@@ -121,8 +125,13 @@ class Runner:
         wandb_api_key = load_wandb_api_key(WANDB_API_KEY_DIR)
         os.environ["WANDB_API_KEY"] = wandb_api_key
         os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
-        import wandb
-        wandb.init(project="coref-multiling", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
+        while True:
+            try:
+                wandb.init(project="coref-multiling", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
+                break
+            except (requests.exceptions.ConnectionError, ConnectionRefusedError, wandb.errors.UsageError) as e:
+                logger.error(e)
+                time.sleep(5)
 
     def initialize_model(self, saved_suffix=None):
         model = CorefModel(self.config, self.device)
