@@ -263,7 +263,7 @@ class Runner:
 
     def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
         if isinstance(conll_path, list):
-            for path in self.config['conll_test_path']:
+            for path in conll_path:
                 self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer, save_predictions, phase)
             return 0.0, None
         model.to(self.device)
@@ -443,10 +443,15 @@ class Runner:
     def load_model_from_experiment(self, model, experiment_name):
         config = util.initialize_config(experiment_name)
         dir = config["log_dir"]
-        import glob
-        models = glob.glob(join(dir, 'model_*'))
-        models.sort(key=cmp_to_key(compare_models))
-        model.load_state_dict(torch.load(models[-1], map_location=torch.device('cpu')), strict=False)
+        if "model_suffix" in self.config:
+            path_ckpt = join(config['log_dir'], f'model_{self.config["model_suffix"]}.bin')
+            model.load_state_dict(torch.load(path_ckpt, map_location=torch.device('cpu')), strict=False)
+            logger.info('Loaded model from %s' % path_ckpt)
+        else:
+            import glob
+            models = glob.glob(join(dir, 'model_*'))
+            models.sort(key=cmp_to_key(compare_models))
+            model.load_state_dict(torch.load(models[-1], map_location=torch.device('cpu')), strict=False)
 
 def compare_models(m1, m2):
     split1 = m1.split("/")[-1].split("_")
