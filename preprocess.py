@@ -245,7 +245,8 @@ class DocumentState(object):
                 if i == 0 or i == len(seg_info) - 1:
                     subparents.append(-1)
                 elif subtoken_info is not None:  # First subtoken of each word
-                    parent = udapi_words[word_index].parent
+                    node = udapi_words[word_index]
+                    parent = node.deps[0]["parent"] if len(node.deps) > 0 else node.parent
                     if parent is None or parent.form == "<ROOT>":
                         subparents.append(-1)
                     else:
@@ -280,6 +281,8 @@ class DocumentState(object):
         assert num_all_seg_tokens == len(util.flatten(self.speakers))
         assert num_all_seg_tokens == len(subtoken_map)
         assert num_all_seg_tokens == len(sentence_map)
+        assert len(np.unique(sentence_map)) == max(sentence_map) + 1
+        assert len(np.unique(subtoken_map)) == max(subtoken_map) + 1
 
         return {
             "doc_key": self.doc_key,
@@ -349,7 +352,8 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
         document_state.token_end += [False] * (len(subtokens) - 1) + [True]
         for idx, subtoken in enumerate(subtokens):
             document_state.subtokens.append(subtoken)
-            info = None if idx != 0 else ([node.ord] + [node.form] + [node.parent] + [node.udeprel] + [len(subtokens)])
+            deprel = node.udeprel if node.udeprel is not None else node.deps[0]["deprel"]
+            info = None if idx != 0 else ([node.ord] + [node.form] + [node.parent] + [deprel] + [len(subtokens)])
             document_state.info.append(info)
             document_state.sentence_end.append(False)
             document_state.subtoken_map.append(word_idx)
@@ -367,7 +371,7 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
 
 
 def minimize_partition(partition, extension, args, tokenizer):
-    input_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{extension}')
+    input_path = os.path.join(args.data_dir, '..' , f'{args.language}-{partition}.{extension}')
     output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{args.max_segment_len}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')

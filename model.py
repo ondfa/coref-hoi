@@ -83,6 +83,8 @@ class CorefModel(nn.Module):
         # Model
         self.dropout = nn.Dropout(p=config['dropout_rate'])
         bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'])
+        bert_config.hidden_dropout_prob = config['bert_dropout_rate']
+        bert_config.attention_probs_dropout_prob = config['bert_dropout_rate']
         model = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
         bert_config.return_dict = False
         if "bert_weights_name" in config:

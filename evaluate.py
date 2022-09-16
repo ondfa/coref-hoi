@@ -7,7 +7,7 @@ from os.path import join
 def evaluate(config_name, gpu_id, saved_suffix):
     runner = Runner(config_name, gpu_id)
     if saved_suffix == "last":
-        if "load_model_from_exp" in runner.config:
+        if "load_model_from_exp" in runner.config and runner.config["load_model_from_exp"]:
             exp = runner.config["load_model_from_exp"]
         else:
             exp = runner.name
