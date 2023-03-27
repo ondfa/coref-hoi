@@ -1,5 +1,6 @@
 import udapi
 import udapi.core
+from udapi.block.corefud.movehead import MoveHead
 from udapi.block.read.conllu import Conllu as ConlluReader
 from udapi.block.write.conllu import Conllu as ConlluWriter
 from udapi.core.coref import CorefEntity
@@ -18,6 +19,7 @@ def write_data(docs, f):
 
 def map_to_udapi(udapi_docs, predictions, subtoken_map):
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
+    move_head = MoveHead()
     for doc_key, clusters in predictions.items():
         doc = udapi_docs_map[doc_key]
         udapi_words = [word for word in doc.nodes_and_empty]
@@ -27,6 +29,7 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map):
             for start, end in mentions:
                 start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
                 entity.create_mention(words=udapi_words[start: end + 1])
+        move_head.run(doc)
         udapi.core.coref.store_coref_to_misc(doc)
     return udapi_docs
 
