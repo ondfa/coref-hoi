@@ -1,3 +1,5 @@
+import copy
+
 import math
 
 import torch
@@ -5,7 +7,7 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 import util
 import logging
-from collections import Iterable
+from typing import Iterable
 import numpy as np
 import torch.nn.init as init
 import higher_order as ho
@@ -715,6 +717,48 @@ class CorefModel(nn.Module):
         evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
         return predicted_clusters
 
+    def merge_clusters(self, first_clusters, first_m2c, second_clusters, second_m2c):
+        res_clusters = copy.deepcopy(first_clusters)
+        res_m2c = copy.deepcopy(first_m2c)
+        for cluster in second_clusters:
+            found = False
+            for mention in cluster:
+                if mention in first_m2c:
+                    cluster_id = first_m2c[mention]
+                    found = True
+                    if cluster == first_clusters[cluster_id]:
+                        break
+                    res_clusters[cluster_id] = tuple(sorted(list(set(first_clusters[cluster_id]) | set(cluster))))
+                    for mention in cluster:
+                        if mention in res_m2c and res_m2c[mention] != cluster_id:
+                            res_clusters[res_m2c[mention]] = tuple(sorted(list(set(res_clusters[res_m2c[mention]]) - {mention})))
+                        res_m2c[mention] = cluster_id
+                    break
+            if not found:
+                for mention in cluster:
+                    res_m2c[mention] = len(res_clusters)
+                res_clusters.append(cluster)
+        res_clusters = [cluster for cluster in res_clusters if len(cluster) > 0]
+        res_m2c = {}
+        for i, cluster in enumerate(res_clusters):
+            for mention in cluster:
+                res_m2c[mention] = i
+        return res_clusters, res_m2c
+
+    def filter_overlapping(self, clusters, m2c, end):
+        res_clusters = []
+        res_m2c = {}
+        for i, cluster in enumerate(clusters):
+            found = False
+            for mention in cluster:
+                if mention[1] > end - self.config["max_segment_len"]:
+                    found = True
+                    break
+            if found:
+                for mention in cluster:
+                    res_m2c[mention] = len(res_clusters)
+                res_clusters.append(cluster)
+        return res_clusters, res_m2c
 
 def sigmoid(x):
     return 1 / (1 + torch.exp(-x))

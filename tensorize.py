@@ -240,14 +240,16 @@ class Tensorizer:
 
     def split_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
                       parents, deprels, heads=None,
-                      gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
+                      gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, step=None):
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
+        if step is None:
+            step = max_sentences
         num_sentences = input_ids.shape[0]
         offset = 0
         splits = []
-        while offset < num_sentences:
+        while offset + max_sentences - 1 < num_sentences:
             splits.append(self.truncate_example(input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
                                                 is_training, parents, deprels, heads, gold_starts, gold_ends,
                                                 gold_mention_cluster_map, sentence_offset=offset))
-            offset += max_sentences
+            offset += step
         return splits

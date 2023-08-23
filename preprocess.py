@@ -371,7 +371,7 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
 
 
 def minimize_partition(partition, extension, args, tokenizer):
-    input_path = os.path.join(args.data_dir, '..' , f'{args.language}-{partition}.{extension}')
+    input_path = os.path.join(args.data_dir, '..', f'{args.language}-{partition}.{extension}')
     output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{args.max_segment_len}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
@@ -381,7 +381,8 @@ def minimize_partition(partition, extension, args, tokenizer):
         if "joined_languages" in args:
             udapi_documents = []
             for i in range(len(args.joined_languages)):
-                input_path = os.path.join(args.joined_dirs[i], f'{args.joined_languages[i]}-{partition}.{extension}')
+                input_path = os.path.join(args.joined_dirs[i], '..', f'{args.joined_languages[i]}-{partition}.{extension}')
+                print(f"loading documents for language: {args.joined_languages[i]}...")
                 udapi_documents.extend(udapi_io.read_data(input_path))
         else:
             udapi_documents = udapi_io.read_data(input_path)
@@ -401,8 +402,8 @@ def minimize_language(args):
     # minimize_partition('train', 'v4_gold_conll', args, tokenizer)
 
 
-    minimize_partition('test', 'conllu', args, tokenizer)
-    minimize_partition('dev', 'conllu', args, tokenizer)
+    # minimize_partition('test', 'conllu', args, tokenizer)
+    # minimize_partition('dev', 'conllu', args, tokenizer)
     minimize_partition('train', 'conllu', args, tokenizer)
 
 

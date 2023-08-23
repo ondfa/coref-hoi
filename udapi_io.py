@@ -1,12 +1,17 @@
 import udapi
 import udapi.core
+from udapi.block.corefud.movehead import MoveHead
 from udapi.block.read.conllu import Conllu as ConlluReader
 from udapi.block.write.conllu import Conllu as ConlluWriter
 from udapi.core.coref import CorefEntity
 
 
 def read_data(file):
-    return ConlluReader(files=file, split_docs=True).read_documents()
+    move_head = MoveHead()
+    docs = ConlluReader(files=file, split_docs=True).read_documents()
+    for doc in docs:
+        move_head.run(doc)
+    return docs
 
 def write_data(docs, f):
     writer = ConlluWriter(filehandle=f)
@@ -20,6 +25,7 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map, doc_span_to_head=None):
     entities = 1
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
     docs = []
+    move_head = MoveHead()
     for doc_key, clusters in predictions.items():
         if doc_key not in udapi_docs_map:
             continue
@@ -40,6 +46,7 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map, doc_span_to_head=None):
                 else:
                     start, end = subtoken_map[doc_key][start], subtoken_map[doc_key][end]
                     entity.create_mention(words=udapi_words[start: end + 1])
+        move_head.run(doc)
         udapi.core.coref.store_coref_to_misc(doc)
         docs.append(doc)
     return docs

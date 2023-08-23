@@ -261,11 +261,45 @@ class Runner:
         tb_writer.close()
         return loss_history
 
+    def find_cross_segment_coreference(self, examples, segment_len=1):
+        cross_segment_corefs = []
+        cross_examples = []
+        for example in examples:
+            segment_lens = example[1][3]
+            cluster_ids = example[1][-1]
+            mention_span_starts = example[1][-3]
+            cluster_segment_ids = torch.sum(torch.unsqueeze(mention_span_starts, dim=0) > torch.unsqueeze(segment_lens, dim=1), dim=0)
+            same_cluster = torch.triu(torch.unsqueeze(cluster_ids, dim=0) == torch.unsqueeze(cluster_ids, dim=1), diagonal=1)
+            # different_segment = torch.triu(torch.abs(torch.unsqueeze(cluster_segment_ids, dim=0) - torch.unsqueeze(cluster_segment_ids, dim=1)) >= segment_len, diagonal=1)
+            different_segment = torch.triu((torch.unsqueeze(cluster_segment_ids, dim=0) // segment_len) != (torch.unsqueeze(cluster_segment_ids, dim=1) // segment_len), diagonal=1)
+            cross_segment = same_cluster & different_segment
+            cross_segment_corefs.append(cross_segment)
+            if torch.any(cross_segment):
+                cross_examples.append(example)
+                print("Cross-segment coreference found.")
+        return cross_examples, cross_segment_corefs
+
+    def filter_gold_data(self, tensor_examples, gold_data):
+        res_docs = []
+        ids = set([example[0] for example in tensor_examples])
+        for doc in gold_data:
+            if doc.meta["docname"] in ids:
+                res_docs.append(doc)
+        return res_docs
+
     def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
         if isinstance(conll_path, list):
             for path in conll_path:
                 self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer, save_predictions, phase)
             return 0.0, None
+        if self.config["eval_cross_segment"]:
+            tensor_examples, _ = self.find_cross_segment_coreference(tensor_examples, self.config["max_training_sentences"])
+            gold_data = udapi_io.read_data(conll_path)
+            gold_data = self.filter_gold_data(tensor_examples, gold_data)
+            gold_fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
+            udapi_io.write_data(gold_data, gold_fd)
+            gold_fd.flush()
+            conll_path = gold_fd.name
         model.to(self.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
@@ -280,16 +314,36 @@ class Runner:
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
             else:
-                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example)
+                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=1 if self.config["max_segment_overlap"] else None)
             predicted_clusters = []
             mention_to_cluster_id = {}
             span_to_head = {}
+            # all_span_starts = []
+            # all_span_ends = []
+            # all_antecedent_idx = []
+            # all_antecedent_scores = []
+            # antecedent_offset = 0
             for j, example in enumerate(batch_examples):
                 example_gpu = [d.to(self.device) for d in example]
                 with torch.no_grad():
                     _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
+                    offset = j if self.config["max_segment_overlap"] else j * max_sentences
+                    # num_antecedents_in_first_segment = torch.sum(span_starts < example_gpu[3][0])
+                    # if self.config["max_segment_overlap"]:
+                    #     if j > 0 and example[0].shape[0] > 1:
+                            # original_ids = torch.arange(span_starts.shape[0], device=span_starts.device)[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1]]
+                            # span_ends = span_ends[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1]]
+                            # shifts = original_ids - torch.arange(span_ends.shape[0], device=span_starts.device)
+                            # antecedent_idx = antecedent_idx[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1], :]
+                            # antecedent_idx -= torch.unsqueeze(shifts, dim=1)
+                            # antecedent_scores = antecedent_scores[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1], :]
+                            # span_starts = span_starts[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1]]
+                    # antecedent_idx += antecedent_offset
+                    # if self.config["max_segment_overlap"]:
+                    #     antecedent_offset += num_antecedents_in_first_segment
+                    # else:
+                    #     antecedent_offset += span_starts.shape[0]
                     sentence_len = tensor_example[3]
-                    offset = j * max_sentences
                     word_offset = sentence_len[:offset].sum()
                     span_starts = span_starts + word_offset
                     span_ends = span_ends + word_offset
@@ -299,10 +353,20 @@ class Runner:
                     model.get_mention2head_map(span_starts.tolist(), span_ends.tolist(), heads, span_to_head)
                 span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
                 antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
+                # all_span_starts.extend(span_starts)
+                # all_span_ends.extend(span_ends)
+                # all_antecedent_idx.extend(antecedent_idx)
+                # all_antecedent_scores.extend(antecedent_scores)
                 tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
-                predicted_clusters.extend(tmp_predicted_clusters)
-                mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
+                if self.config["max_segment_overlap"] and self.config["filter_overlapping_mentions"] and j > 0:
+                    tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:offset + max_sentences].sum() - 1)
+                if self.config["max_segment_overlap"]:
+                    predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id)
+                else:
+                    predicted_clusters.extend(tmp_predicted_clusters)
+                    mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
             predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
+            # predicted_clusters = model.update_evaluator(all_span_starts, all_span_ends, all_antecedent_idx, all_antecedent_scores, gold_clusters, evaluator)
             if self.config["filter_singletons"]:
                 predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters
@@ -339,7 +403,8 @@ class Runner:
                 tb_writer.add_scalar(name, score, step)
         wandb.log(metrics)
 
-
+        if self.config["eval_cross_segment"]:
+            gold_fd.close()
         return f * 100, metrics
 
     def predict(self, model, tensor_examples):

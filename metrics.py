@@ -4,8 +4,7 @@ from __future__ import print_function
 
 import numpy as np
 from collections import Counter
-from sklearn.utils.linear_assignment_ import linear_assignment
-from scipy.optimize import linear_sum_assignment
+from linear_assignment_ import linear_assignment
 
 
 def f1(p_num, p_den, r_num, r_den, beta=1):

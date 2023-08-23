@@ -1,3 +1,7 @@
+from collections import defaultdict
+
+import torch
+
 from model import CorefModel
 from run import Runner
 import sys
@@ -6,6 +10,8 @@ from os.path import join
 
 def evaluate(config_name, gpu_id, saved_suffix):
     runner = Runner(config_name, gpu_id)
+    examples_train, examples_dev, examples_test = runner.data.get_tensor_examples()
+    # find_cross_example_coreference(examples_dev)
     if saved_suffix == "last":
         if "load_model_from_exp" in runner.config and runner.config["load_model_from_exp"]:
             exp = runner.config["load_model_from_exp"]
@@ -16,7 +22,6 @@ def evaluate(config_name, gpu_id, saved_suffix):
     else:
         model = runner.initialize_model(saved_suffix)
 
-    examples_train, examples_dev, examples_test = runner.data.get_tensor_examples()
     stored_info = runner.data.get_stored_info()
 
     runner.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=runner.config['conll_eval_path'], save_predictions=True, phase="dev")  # Eval dev
