@@ -17,6 +17,7 @@ class CorefDataProcessor:
     def __init__(self, config, language='english'):
         self.config = config
         self.language = language
+        self.empty_suffix = ".empty" if config["solve_empty_nodes"] else ""
 
         self.max_seg_len = config['max_segment_len']
         self.max_training_seg = config['max_training_sentences']
@@ -34,9 +35,9 @@ class CorefDataProcessor:
             self.tensor_samples = {}
             tensorizer = Tensorizer(self.config)
             paths = {
-                'trn': join(self.data_dir, f'{language}-train.{self.max_seg_len}.jsonlines'),
-                'dev': join(self.data_dir, f'{language}-dev.{self.max_seg_len}.jsonlines'),
-                'tst': join(self.data_dir, f'{language}-test.{self.max_seg_len}.jsonlines')
+                'trn': join(self.data_dir, f'{language}-train.{self.max_seg_len}{self.empty_suffix}.jsonlines'),
+                'dev': join(self.data_dir, f'{language}-dev.{self.max_seg_len}{self.empty_suffix}.jsonlines'),
+                'tst': join(self.data_dir, f'{language}-test.{self.max_seg_len}{self.empty_suffix}.jsonlines')
             }
             for split, path in paths.items():
                 logger.info('Tensorizing examples from %s; results will be cached)' % path)
@@ -53,13 +54,14 @@ class CorefDataProcessor:
 
     @classmethod
     def convert_to_torch_tensor(cls, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
-                                is_training, parents, deprel_ids, heads,
+                                is_training, parents, deprel_ids, instruction_ids, heads,
                                 gold_starts, gold_ends, gold_mention_cluster_map):
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         input_mask = torch.tensor(input_mask, dtype=torch.long)
         speaker_ids = torch.tensor(speaker_ids, dtype=torch.long)
         parents = torch.tensor(parents, dtype=torch.long)
         deprel_ids = torch.tensor(deprel_ids, dtype=torch.long)
+        instruction_ids = torch.tensor(instruction_ids, dtype=torch.long)
         sentence_len = torch.tensor(sentence_len, dtype=torch.long)
         genre = torch.tensor(genre, dtype=torch.long)
         sentence_map = torch.tensor(sentence_map, dtype=torch.long)
@@ -69,7 +71,7 @@ class CorefDataProcessor:
         gold_ends = torch.tensor(gold_ends, dtype=torch.long)
         gold_mention_cluster_map = torch.tensor(gold_mention_cluster_map, dtype=torch.long)
         return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, \
-               is_training, parents, deprel_ids, heads, \
+               is_training, parents, deprel_ids, instruction_ids, heads, \
                gold_starts, gold_ends, gold_mention_cluster_map,
 
     def get_tensor_examples(self):
@@ -80,7 +82,7 @@ class CorefDataProcessor:
         return self.stored_info
 
     def get_cache_path(self):
-        cache_path = join(self.data_dir, f'cached.tensors.{self.language}.{self.max_seg_len}.{self.max_training_seg}.bin')
+        cache_path = join(self.data_dir, f'cached.tensors.{self.language}.{self.max_seg_len}.{self.max_training_seg}{self.empty_suffix}.bin')
         return cache_path
 
 
@@ -97,6 +99,7 @@ class Tensorizer:
         self.stored_info['gold'] = {}  # {doc_key: ...}
         self.stored_info['genre_dict'] = {genre: idx for idx, genre in enumerate(config['genres'])}
         self.stored_info['deprels_dict'] = {} if "deprels" not in config else {deprel: i for i, deprel in enumerate(config["deprels"])}
+        self.stored_info["instructions_dict"] = {"-100": -100}  # -100=ignored labels
 
 
     def _tensorize_spans(self, spans):
@@ -122,10 +125,22 @@ class Tensorizer:
                 speaker_dict[speaker] = len(speaker_dict)
         return speaker_dict
 
+    def update_dict(self, dict, values):
+        for value in values:
+            if value not in dict:
+                dict[value] = len(dict)
+
     def update_deprel_dict(self, deprels):
-        for deprel in deprels:
-            if deprel not in self.stored_info['deprels_dict']:
-                self.stored_info['deprels_dict'][deprel] = len(self.stored_info['deprels_dict'])
+        self.update_dict(self.stored_info['deprels_dict'], deprels)
+
+    def update_ins_dict(self, instructions):
+        self.update_dict(self.stored_info['instructions_dict'], instructions)
+
+    def preprocess_instructions(self, instructions):
+        instructions = [",".join(ins) for ins in instructions]
+        # TODO simplify instructions if configured
+        return instructions
+
 
 
     def tensorize_example(self, example, is_training):
@@ -146,6 +161,7 @@ class Tensorizer:
         speaker_dict = self._get_speaker_dict(util.flatten(speakers))
         deprels = example["deprels"]
         parents = example["parents"]
+        instructions = example["instructions"]
         # Sentences/segments
         sentences = example['sentences']  # Segments
         sentence_map = example['sentence_map']
@@ -155,19 +171,24 @@ class Tensorizer:
 
         # Bert input
         input_ids, input_mask, speaker_ids = [], [], []
-        parents_tensor, deprels_tensor = [], []
-        for idx, (sent_tokens, sent_speakers, sent_parents, sent_deprels) in enumerate(zip(sentences, speakers, parents, deprels)):
+        parents_tensor, deprels_tensor, instructions_tensor = [], [], []
+        for idx, (sent_tokens, sent_speakers, sent_parents, sent_deprels, sent_instructions) in enumerate(zip(sentences, speakers, parents, deprels, instructions)):
             self.update_deprel_dict(set(sent_deprels))
+            sent_instructions = self.preprocess_instructions(sent_instructions)
+            self.update_ins_dict(set(sent_instructions))
             sent_input_ids = self.tokenizer.convert_tokens_to_ids(sent_tokens)
             sent_input_mask = [1] * len(sent_input_ids)
             sent_speaker_ids = [speaker_dict[speaker] for speaker in sent_speakers]
             sent_deprel_ids = [self.stored_info["deprels_dict"][deprel] for deprel in sent_deprels]
+            sent_ins_ids = [self.stored_info["instructions_dict"][instruction] for instruction in sent_instructions]
+
 
             while len(sent_input_ids) < max_sentence_len:
                 sent_input_ids.append(0)
                 sent_input_mask.append(0)
                 sent_speaker_ids.append(0)
                 sent_deprel_ids.append(0)
+                sent_ins_ids.append(-100)
                 for par in sent_parents:
                     par.append(-1)
             input_ids.append(sent_input_ids)
@@ -175,11 +196,13 @@ class Tensorizer:
             speaker_ids.append(sent_speaker_ids)
             parents_tensor.append(sent_parents)
             deprels_tensor.append(sent_deprel_ids)
+            instructions_tensor.append(sent_ins_ids)
         input_ids = np.array(input_ids)
         input_mask = np.array(input_mask)
         speaker_ids = np.array(speaker_ids)
         parents_tensor = np.array(parents_tensor)
         deprels_tensor = np.array(deprels_tensor)
+        instructions_tensor = np.array(instructions_tensor)
         assert num_words == np.sum(input_mask), (num_words, np.sum(input_mask))
 
 
@@ -197,7 +220,7 @@ class Tensorizer:
         # TODO for some languages heads are out of span
         assert input_mask.shape == input_ids.shape == speaker_ids.shape
         example_tensor = (input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
-                          parents_tensor, deprels_tensor, heads,
+                          parents_tensor, deprels_tensor, instructions_tensor, heads,
                           gold_starts, gold_ends, gold_mention_cluster_map)
 
         if is_training and len(sentences) > self.config['max_training_sentences']:
@@ -206,7 +229,7 @@ class Tensorizer:
             return doc_key, example_tensor
 
     def truncate_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
-                         parents, deprels, heads=None,
+                         parents, deprels, instructions, heads=None,
                          gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
         max_sentences = self.config["max_training_sentences"]
         num_sentences = input_ids.shape[0]
@@ -224,6 +247,7 @@ class Tensorizer:
         parents = parents[sent_offset: sent_offset + max_sentences, :]
         parents[parents >= 0] -= word_offset
         deprels = deprels[sent_offset: sent_offset + max_sentences, :]
+        instructions = instructions[sent_offset: sent_offset + max_sentences, :]
         sentence_len = sentence_len[sent_offset: sent_offset + max_sentences]
 
         sentence_map = sentence_map[word_offset: word_offset + num_words]
@@ -236,10 +260,10 @@ class Tensorizer:
         gold_mention_cluster_map = gold_mention_cluster_map[gold_spans]
 
         return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, \
-               is_training, parents, deprels, heads, gold_starts, gold_ends, gold_mention_cluster_map
+               is_training, parents, deprels, instructions, heads, gold_starts, gold_ends, gold_mention_cluster_map
 
     def split_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
-                      parents, deprels, heads=None,
+                      parents, deprels, instructions, heads=None,
                       gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, step=None):
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         if step is None:
@@ -249,7 +273,7 @@ class Tensorizer:
         splits = []
         while offset + max_sentences - 1 < num_sentences:
             splits.append(self.truncate_example(input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
-                                                is_training, parents, deprels, heads, gold_starts, gold_ends,
+                                                is_training, parents, deprels, instructions, heads, gold_starts, gold_ends,
                                                 gold_mention_cluster_map, sentence_offset=offset))
             offset += step
         return splits

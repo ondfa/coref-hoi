@@ -70,7 +70,7 @@ positional_mapping_types = {"random": create_positional_embeddings_random, "repe
 
 
 class CorefModel(nn.Module):
-    def __init__(self, config, device, num_genres=None):
+    def __init__(self, config, device, num_genres=None, instructions=None):
         super().__init__()
         self.config = config
         self.device = device
@@ -164,6 +164,9 @@ class CorefModel(nn.Module):
                 self.span2head_ffnn = self.make_ffnn(self.span_emb_size + self.bert_emb_size, config["ffnn_size"], output_size=1)
             else:
                 self.span2head_ffnn = self.make_ffnn(self.span_emb_size, config["ffnn_size"], output_size=self.max_span_width)
+        if config["use_push_pop_detection"] and instructions is not None:
+            self.push_pop_ffnn = self.make_ffnn(self.bert_emb_size, config["ffnn_size"], output_size=len(instructions))
+        self.instructions = instructions
         self.update_steps = 0  # Internal use for debug
         self.debug = True
 
@@ -207,9 +210,25 @@ class CorefModel(nn.Module):
     def forward(self, *input):
         return self.get_predictions_and_loss(*input)
 
+    def extract_spans_from_push_pop(self, instructions):
+        span_starts, span_ends = [], []
+        instructions = [self.instructions[instruction].split(",") for instruction in instructions]
+        stack = []
+        for i, ins in enumerate(instructions):
+            for instruction in ins[1:]:
+                if instruction == "PUSH":
+                    stack.append(len(span_ends))
+                    span_starts.append(i)
+                    span_ends.append(-1)
+                else:
+                    stack_index = int(instruction.split(":")[-1])
+                    span_ends[stack[-stack_index]] = i
+                    stack.pop(-stack_index)
+        return span_starts, span_ends
+
     def get_predictions_and_loss(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
-                                 is_training, parents, deprel_ids, heads=None,
-                                 gold_starts=None, gold_ends=None, gold_mention_cluster_map=None):
+                                 is_training, parents, deprel_ids, instructions,
+                                 heads=None, gold_starts=None, gold_ends=None, gold_mention_cluster_map=None):
         """ Model and input are already on the device """
         device = self.device
         conf = self.config
@@ -322,6 +341,9 @@ class CorefModel(nn.Module):
         candidate_starts_cpu, candidate_ends_cpu = candidate_starts.tolist(), candidate_ends.tolist()
         num_top_spans = int(min(conf['max_num_extracted_spans'], conf['top_span_ratio'] * num_words))
         selected_idx_cpu = self._extract_top_spans(candidate_idx_sorted_by_score, candidate_starts_cpu, candidate_ends_cpu, num_top_spans)
+        if self.config["use_push_pop_detection"]:
+            instructions_logits = self.push_pop_ffnn(mention_doc)
+            pp_span_starts, pp_span_ends = self.extract_spans_from_push_pop(torch.argmax(instructions_logits.cpu(), dim=-1))
         assert len(selected_idx_cpu) == num_top_spans
         selected_idx = torch.tensor(selected_idx_cpu, device=device)
         top_span_starts, top_span_ends = candidate_starts[selected_idx], candidate_ends[selected_idx]

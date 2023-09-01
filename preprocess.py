@@ -183,11 +183,15 @@ class DocumentState(object):
         first_subtoken_idx = 0  # Subtoken idx across segments
         subtokens_info = util.flatten(self.segment_info)
         word2subword = {}
+        stack = []
+        instructions = []
         for word_index, word in enumerate(udapi_doc.nodes_and_empty):
+            word_instructions = []
+            word_instructions.append(str(len(stack)))
             while subtokens_info[first_subtoken_idx] is None:
                 first_subtoken_idx += 1
             subtoken_info = subtokens_info[first_subtoken_idx]
-            corefs = word.coref_mentions
+            corefs = sorted(list(set(word.coref_mentions)))
             word2subword[word_index] = first_subtoken_idx
             if word.ord != subtoken_info[0]:
                 print("fd")
@@ -198,10 +202,21 @@ class DocumentState(object):
                     if "," in part.span:
                         continue    # Skip discontinuous mentions
                     cluster_id = part.entity.eid
+                    if part.span.split("-")[-1] == str(word.ord):
+                        for j in reversed(range(len(stack))):
+                            eid, start, end = stack[j]
+                            if end == str(word.ord):
+                                word_instructions.append(f"POP:{len(stack)-j}")
+                                stack.pop(j)
+                                break
                     if part.head == word:
                         heads[word.ord] = first_subtoken_idx
                     if part.span.split("-")[0] == str(word.ord):
+                        word_instructions.append("PUSH")
+                        stack.append((part.entity.eid, part.span.split("-")[0], part.span.split("-")[-1]))
                         if part.span.split("-")[-1] == str(word.ord):
+                            word_instructions.append("POP:1")
+                            stack.pop()
                             self.clusters[cluster_id].append((first_subtoken_idx, last_subtoken_idx))
                             final_heads[str(first_subtoken_idx) + "-" + str(last_subtoken_idx)] = first_subtoken_idx
                         else:
@@ -211,6 +226,8 @@ class DocumentState(object):
                         self.clusters[cluster_id].append((start, last_subtoken_idx))
                         final_heads[str(start) + "-" + str(last_subtoken_idx)] = heads[part.head.ord]
             first_subtoken_idx += 1
+            instructions.append(word_instructions)
+        assert len(stack) == 0
 
         # Merge clusters if any clusters have common mentions
         merged_clusters = []
@@ -239,11 +256,14 @@ class DocumentState(object):
         word_index = 0
         offset = 0
         parents = []
+        final_instructions = []
         for seg_info in self.segment_info:
+            subword_instructions = []
             subparents = []
             for i, subtoken_info in enumerate(seg_info):
                 if i == 0 or i == len(seg_info) - 1:
                     subparents.append(-1)
+                    subword_instructions.append(["-100"])
                 elif subtoken_info is not None:  # First subtoken of each word
                     node = udapi_words[word_index]
                     parent = node.deps[0]["parent"] if len(node.deps) > 0 else node.parent
@@ -251,9 +271,12 @@ class DocumentState(object):
                         subparents.append(-1)
                     else:
                         subparents.append(word2subword[udapi_words.index(parent)])
+                    subword_instructions.append(instructions[word_index])
                     word_index += 1
                 else:
                     subparents.append(subparents[-1])
+                    subword_instructions.append(["-100"])
+            final_instructions.append(subword_instructions)
 
             ###### convert parents to paths
             subparents = np.array(subparents)
@@ -297,7 +320,8 @@ class DocumentState(object):
             'pronouns': self.pronouns,
             "parents": parents,
             "deprels": deprels,
-            "heads": final_heads
+            "heads": final_heads,
+            "instructions": final_instructions
         }
 
 
@@ -334,7 +358,7 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
         prev_token_idx = subtoken_map[-1]
 
 
-def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
+def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, solve_empty_nodes=True):
     """ Process raw input to finalized documents """
     document_state = DocumentState(doc_key)
     word_idx = -1
@@ -346,7 +370,10 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
             document_state.sentence_end[-1] = True
             # assert len(row) >= 12
         word_idx += 1
-        word = normalize_word(node.form, language)
+        if node.lemma.startswith("#") and solve_empty_nodes:
+            word = normalize_word(node.form, language) + node.lemma  # Lemma (node type) added for empty nodes
+        else:
+            word = normalize_word(node.form, language)
         subtokens = tokenizer.tokenize(word)
         document_state.tokens.append(word)
         document_state.token_end += [False] * (len(subtokens) - 1) + [True]
@@ -372,7 +399,7 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None):
 
 def minimize_partition(partition, extension, args, tokenizer):
     input_path = os.path.join(args.data_dir, '..', f'{args.language}-{partition}.{extension}')
-    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{args.max_segment_len}.jsonlines')
+    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{args.max_segment_len}{".empty" if args.solve_empty_nodes else ""}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
 
@@ -387,7 +414,7 @@ def minimize_partition(partition, extension, args, tokenizer):
         else:
             udapi_documents = udapi_io.read_data(input_path)
         for doc in udapi_documents:
-            document = get_document(doc.meta["docname"], args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count])
+            document = get_document(doc.meta["docname"], args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count], args.solve_empty_nodes)
             output_file.write(json.dumps(document))
             output_file.write('\n')
             doc_count += 1
@@ -402,8 +429,8 @@ def minimize_language(args):
     # minimize_partition('train', 'v4_gold_conll', args, tokenizer)
 
 
-    # minimize_partition('test', 'conllu', args, tokenizer)
-    # minimize_partition('dev', 'conllu', args, tokenizer)
+    minimize_partition('test', 'conllu', args, tokenizer)
+    minimize_partition('dev', 'conllu', args, tokenizer)
     minimize_partition('train', 'conllu', args, tokenizer)
 
 

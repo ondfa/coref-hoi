@@ -162,6 +162,8 @@ class Runner:
         if conf["add_dev_to_train"]:
             examples_train.extend(examples_dev)
         stored_info = self.data.get_stored_info()
+        if conf["use_push_pop_detection"]:
+            model.instructions = sorted(stored_info["instructions_dict"].items(), key=lambda entry: entry[1])[1:]
 
         # Set up optimizer and scheduler
         total_update_steps = len(examples_train) * epochs // grad_accum
@@ -292,10 +294,14 @@ class Runner:
             for path in conll_path:
                 self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer, save_predictions, phase)
             return 0.0, None
-        if self.config["eval_cross_segment"]:
-            tensor_examples, _ = self.find_cross_segment_coreference(tensor_examples, self.config["max_training_sentences"])
+        dataset = conll_path.split("/")[-1].split("-")[0]
+        if self.config["eval_cross_segment"] or self.config["filter_long_mentions"]:
             gold_data = udapi_io.read_data(conll_path)
-            gold_data = self.filter_gold_data(tensor_examples, gold_data)
+            if self.config["eval_cross_segment"]:
+                tensor_examples, _ = self.find_cross_segment_coreference(tensor_examples, self.config["max_training_sentences"])
+                gold_data = self.filter_gold_data(tensor_examples, gold_data)
+            elif self.config["filter_long_mentions"]:
+                gold_data = udapi_io.filter_long_mentions(gold_data, self.config["max_mention_length"])
             gold_fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
             udapi_io.write_data(gold_data, gold_fd)
             gold_fd.flush()
@@ -372,7 +378,6 @@ class Runner:
             doc_to_prediction[doc_key] = predicted_clusters
             if span2head_logits is not None:
                 doc_span_to_head[doc_key] = span_to_head
-        dataset = conll_path.split("/")[-1].split("-")[0]
         p, r, f = evaluator.get_prf()
         metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100}
         metrics[phase + "_" + dataset + "_Avg_Precision"] = p * 100
@@ -380,7 +385,8 @@ class Runner:
         metrics[phase + "_" + dataset + "_Avg_F1"] = f * 100
         if official:
             udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(conll_path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head)
-
+            if self.config["filter_long_mentions"]:
+                udapi_docs = udapi_io.filter_long_mentions(udapi_docs, self.config["max_mention_length"])
             if save_predictions:
                 path = join(self.config['log_dir'], self.name_suffix + "_pred_" + phase + "_" + conll_path.split("/")[-1])
                 fd = open(path, "wt", encoding="utf-8")
@@ -394,6 +400,8 @@ class Runner:
             metrics[phase + "_" + dataset + "_corefud_score"] = score
             metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
             if save_predictions and self.config["final_path"]:
+                if not os.path.exists(self.config["final_path"]):
+                    os.makedirs(self.config["final_path"])
                 shutil.copyfile(fd.name, os.path.join(self.config["final_path"], conll_path.split("/")[-1]))
             fd.close()
         for name, score in metrics.items():

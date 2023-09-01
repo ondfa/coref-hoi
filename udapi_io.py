@@ -51,6 +51,15 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map, doc_span_to_head=None):
         docs.append(doc)
     return docs
 
+
+def filter_long_mentions(udapi_docs, max_len=1):
+    for doc in udapi_docs:
+        for entity in doc.coref_entities:
+            entity.mentions = [mention for mention in entity.mentions if len(mention.words) <= max_len]
+
+
+
+
 if __name__ == '__main__':
     docs = read_data("data/UD/CorefUD-0.1-public/data/CorefUD_Czech-PDT/cs_pdt-corefud-dev.conllu")
     with open("dev.conllu", "wt", encoding="utf-8") as f:
