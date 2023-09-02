@@ -212,7 +212,7 @@ class CorefModel(nn.Module):
 
     def extract_spans_from_push_pop(self, instructions):
         span_starts, span_ends = [], []
-        instructions = [self.instructions[instruction].split(",") for instruction in instructions]
+        instructions = [self.instructions[instruction - 1].split(",") if instruction > 0 else [] for instruction in instructions]
         stack = []
         for i, ins in enumerate(instructions):
             for instruction in ins[1:]:
@@ -222,9 +222,12 @@ class CorefModel(nn.Module):
                     span_ends.append(-1)
                 else:
                     stack_index = int(instruction.split(":")[-1])
+                    if stack_index > len(stack):
+                        logger.warning("Invalid stack instruction: POP before PUSH.")
+                        continue
                     span_ends[stack[-stack_index]] = i
                     stack.pop(-stack_index)
-        return span_starts, span_ends
+        return torch.tensor(span_starts, device=self.device), torch.tensor(span_ends, device=self.device)
 
     def get_predictions_and_loss(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
                                  is_training, parents, deprel_ids, instructions,
@@ -244,6 +247,7 @@ class CorefModel(nn.Module):
         input_mask = input_mask.to(torch.bool)
         mention_doc = mention_doc[input_mask]
         speaker_ids = speaker_ids[input_mask]
+        instructions = instructions[input_mask]
         num_words = mention_doc.shape[0]
 
         # Get candidate span
@@ -341,11 +345,17 @@ class CorefModel(nn.Module):
         candidate_starts_cpu, candidate_ends_cpu = candidate_starts.tolist(), candidate_ends.tolist()
         num_top_spans = int(min(conf['max_num_extracted_spans'], conf['top_span_ratio'] * num_words))
         selected_idx_cpu = self._extract_top_spans(candidate_idx_sorted_by_score, candidate_starts_cpu, candidate_ends_cpu, num_top_spans)
+        assert len(selected_idx_cpu) == num_top_spans
+        selected_idx = torch.tensor(selected_idx_cpu, device=device)
         if self.config["use_push_pop_detection"]:
             instructions_logits = self.push_pop_ffnn(mention_doc)
             pp_span_starts, pp_span_ends = self.extract_spans_from_push_pop(torch.argmax(instructions_logits.cpu(), dim=-1))
-        assert len(selected_idx_cpu) == num_top_spans
-        selected_idx = torch.tensor(selected_idx_cpu, device=device)
+            equal_starts = torch.unsqueeze(candidate_starts, dim=0) == torch.unsqueeze(pp_span_starts, dim=1)
+            equal_ends = torch.unsqueeze(candidate_ends, dim=0) == torch.unsqueeze(pp_span_ends, dim=1)
+            selected_idx_pp = torch.any((equal_starts & equal_ends), dim=0)
+            selected_idx_pp[selected_idx] = True
+            selected_idx = selected_idx_pp
+            num_top_spans = torch.sum(selected_idx)
         top_span_starts, top_span_ends = candidate_starts[selected_idx], candidate_ends[selected_idx]
         top_span_emb = candidate_span_emb[selected_idx]
         if conf["span2head"]:
@@ -544,7 +554,6 @@ class CorefModel(nn.Module):
                 log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
                 log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
                 loss = torch.sum(log_norm - log_marginalized_antecedent_scores)
-
         elif conf['loss_type'] == 'hinge':
             top_antecedent_mask = torch.cat([torch.ones(num_top_spans, 1, dtype=torch.bool, device=device), top_antecedent_mask], dim=1)
             top_antecedent_scores += torch.log(top_antecedent_mask.to(torch.float))
@@ -590,6 +599,10 @@ class CorefModel(nn.Module):
                 loss += span2head_loss
                 gold_heads = (top_span_heads > 0).sum()
                 gold_heads2 = (top_span_head_offsets >= 0).sum()
+        if conf["use_push_pop_detection"]:
+            pp_loss_fn = torch.nn.CrossEntropyLoss()
+            pp_loss = pp_loss_fn(torch.transpose(instructions_logits, -1, 1), instructions)
+            loss += 100 * pp_loss
         # Debug
         if self.debug:
             if self.update_steps % 20 == 0:
@@ -611,6 +624,9 @@ class CorefModel(nn.Module):
                     logger.info("span2head loss: %.4f" % span2head_loss)
                     metrics["span2head_loss"] = span2head_loss
                     logger.info("Number of gold heads: %d, %d" % (gold_heads, gold_heads2))
+                if conf["use_push_pop_detection"]:
+                    logger.info(f"PUSH/POP loss: {pp_loss}")
+                    metrics["PUSH_POP_loss"] = pp_loss
                 wandb.log(metrics)
         self.update_steps += 1
 

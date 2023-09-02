@@ -133,8 +133,8 @@ class Runner:
                 logger.error(e)
                 time.sleep(5)
 
-    def initialize_model(self, saved_suffix=None):
-        model = CorefModel(self.config, self.device)
+    def initialize_model(self, saved_suffix=None, **kwargs):
+        model = CorefModel(self.config, self.device, **kwargs)
         if saved_suffix:
             self.load_model_checkpoint(model, saved_suffix)
         if "load_model_from_exp" in self.config:
@@ -147,11 +147,6 @@ class Runner:
         logger.info(conf)
         epochs, grad_accum = conf['num_epochs'], conf['gradient_accumulation_steps']
 
-        model.to(self.device)
-        logger.info('Model parameters:')
-        for name, param in model.named_parameters():
-            logger.info('%s: %s' % (name, tuple(param.shape)))
-
         # Set up tensorboard
         tb_path = join(conf['tb_dir'], self.name + '_' + self.name_suffix)
         tb_writer = SummaryWriter(tb_path, flush_secs=30)
@@ -162,8 +157,16 @@ class Runner:
         if conf["add_dev_to_train"]:
             examples_train.extend(examples_dev)
         stored_info = self.data.get_stored_info()
-        if conf["use_push_pop_detection"]:
-            model.instructions = sorted(stored_info["instructions_dict"].items(), key=lambda entry: entry[1])[1:]
+        if model is None:
+            instructions = None
+            if conf["use_push_pop_detection"]:
+                instructions = sorted(stored_info["instructions_dict"].items(), key=lambda entry: entry[1])[1:]
+                instructions = [ins[0] for ins in instructions]
+            model = self.initialize_model(instructions=instructions)
+        logger.info('Model parameters:')
+        for name, param in model.named_parameters():
+            logger.info('%s: %s' % (name, tuple(param.shape)))
+        model.to(self.device)
 
         # Set up optimizer and scheduler
         total_update_steps = len(examples_train) * epochs // grad_accum
@@ -539,6 +542,6 @@ def compare_models(m1, m2):
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
     runner = Runner(config_name, gpu_id)
-    model = runner.initialize_model()
+    # model = runner.initialize_model()
 
-    runner.train(model)
+    runner.train(model=None)
