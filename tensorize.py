@@ -33,7 +33,13 @@ class CorefDataProcessor:
         else:
             # Generate tensorized samples
             self.tensor_samples = {}
-            tensorizer = Tensorizer(self.config)
+            if "load_model_from_exp" in self.config:
+                parent_config = util.initialize_config(config["load_model_from_exp"])
+                parent_config["use_cache"] = True
+                parent_data = CorefDataProcessor(parent_config)
+                tensorizer = Tensorizer(self.config, stored_info=parent_data.stored_info)
+            else:
+                tensorizer = Tensorizer(self.config)
             paths = {
                 'trn': join(self.data_dir, f'{language}-train.{self.max_seg_len}{self.empty_suffix}.jsonlines'),
                 'dev': join(self.data_dir, f'{language}-dev.{self.max_seg_len}{self.empty_suffix}.jsonlines'),
@@ -87,19 +93,21 @@ class CorefDataProcessor:
 
 
 class Tensorizer:
-    def __init__(self, config, local_files_only=False, load_tokenizer=True):
+    def __init__(self, config, local_files_only=False, load_tokenizer=True, stored_info=None):
         self.config = config
         if load_tokenizer:
             self.tokenizer = AutoTokenizer.from_pretrained(config['bert_tokenizer_name'], local_files_only=local_files_only)
 
         # Will be used in evaluation
-        self.stored_info = {}
-        self.stored_info['tokens'] = {}  # {doc_key: ...}
-        self.stored_info['subtoken_maps'] = {}  # {doc_key: ...}; mapping back to tokens
-        self.stored_info['gold'] = {}  # {doc_key: ...}
-        self.stored_info['genre_dict'] = {genre: idx for idx, genre in enumerate(config['genres'])}
-        self.stored_info['deprels_dict'] = {} if "deprels" not in config else {deprel: i for i, deprel in enumerate(config["deprels"])}
-        self.stored_info["instructions_dict"] = {"-100": -100}  # -100=ignored labels
+        self.stored_info = stored_info
+        if self.stored_info is None:
+            self.stored_info = {}
+            self.stored_info['tokens'] = {}  # {doc_key: ...}
+            self.stored_info['subtoken_maps'] = {}  # {doc_key: ...}; mapping back to tokens
+            self.stored_info['gold'] = {}  # {doc_key: ...}
+            self.stored_info['genre_dict'] = {genre: idx for idx, genre in enumerate(config['genres'])}
+            self.stored_info['deprels_dict'] = {} if "deprels" not in config else {deprel: i for i, deprel in enumerate(config["deprels"])}
+            self.stored_info["instructions_dict"] = {} if "instructions" not in config else {deprel: i for i, deprel in enumerate(config["instructions"])}
 
 
     def _tensorize_spans(self, spans):
@@ -134,7 +142,9 @@ class Tensorizer:
         self.update_dict(self.stored_info['deprels_dict'], deprels)
 
     def update_ins_dict(self, instructions):
-        self.update_dict(self.stored_info['instructions_dict'], instructions)
+        for instruction in instructions:
+            if instruction not in self.stored_info["instructions_dict"]:
+                self.stored_info["instructions_dict"][instruction] = len(self.stored_info["instructions_dict"]) - 1
 
     def preprocess_instructions(self, instructions):
         instructions = [",".join(ins) for ins in instructions]
@@ -252,7 +262,7 @@ class Tensorizer:
 
         sentence_map = sentence_map[word_offset: word_offset + num_words]
         if gold_starts is None:
-            return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training, parents, deprels
+            return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training, parents, deprels, instructions
         gold_spans = (gold_starts < word_offset + num_words) & (gold_ends >= word_offset)
         gold_starts = gold_starts[gold_spans] - word_offset
         gold_ends = gold_ends[gold_spans] - word_offset

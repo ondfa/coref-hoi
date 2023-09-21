@@ -257,13 +257,14 @@ class DocumentState(object):
         offset = 0
         parents = []
         final_instructions = []
+        stack_depth = 0
         for seg_info in self.segment_info:
             subword_instructions = []
             subparents = []
             for i, subtoken_info in enumerate(seg_info):
                 if i == 0 or i == len(seg_info) - 1:
                     subparents.append(-1)
-                    subword_instructions.append(["-100"])
+                    subword_instructions.append([str(stack_depth)])
                 elif subtoken_info is not None:  # First subtoken of each word
                     node = udapi_words[word_index]
                     parent = node.deps[0]["parent"] if len(node.deps) > 0 else node.parent
@@ -271,11 +272,20 @@ class DocumentState(object):
                         subparents.append(-1)
                     else:
                         subparents.append(word2subword[udapi_words.index(parent)])
-                    subword_instructions.append(instructions[word_index])
+                    if seg_info[i - 1] is None and i != 1:  # previous word has more subwords
+                        for ins in instructions[word_index - 1][1:]:  # move POP instructions onto the last subword
+                            if ins.startswith("POP"):
+                                subword_instructions[-1].append(ins)
+                    tmp_instructions = instructions[word_index]
+                    stack_depth = int(tmp_instructions[0])
+                    if seg_info[i + 1] is None and i != len(seg_info) - 2:
+                        tmp_instructions = [instruction for instruction in tmp_instructions if not instruction.startswith("POP")]
+                    subword_instructions.append(tmp_instructions)
+                    stack_depth += len([instruction for instruction in tmp_instructions if instruction.startswith("PUSH")])
                     word_index += 1
                 else:
                     subparents.append(subparents[-1])
-                    subword_instructions.append(["-100"])
+                    subword_instructions.append([str(stack_depth)])
             final_instructions.append(subword_instructions)
 
             ###### convert parents to paths

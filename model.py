@@ -4,6 +4,7 @@ import math
 
 import torch
 import torch.nn as nn
+from torchcrf import CRF
 from transformers import AutoConfig, AutoModel
 import util
 import logging
@@ -70,7 +71,7 @@ positional_mapping_types = {"random": create_positional_embeddings_random, "repe
 
 
 class CorefModel(nn.Module):
-    def __init__(self, config, device, num_genres=None, instructions=None):
+    def __init__(self, config, device, num_genres=None, instructions=None, subtoken_map=None, deprels=None):
         super().__init__()
         self.config = config
         self.device = device
@@ -141,7 +142,8 @@ class CorefModel(nn.Module):
         self.emb_segment_distance = self.make_embedding(config['max_training_sentences']) if config['use_segment_distance'] else None
         self.emb_top_antecedent_distance = self.make_embedding(10)
         self.emb_cluster_size = self.make_embedding(10) if config['higher_order'] == 'cluster_merging' else None
-        self.emb_deprels = self.make_embedding(len(config['deprels'])) if config['use_trees'] else None
+        num_deprels = len(config["deprels"]) if deprels is None else len(deprels)
+        self.emb_deprels = self.make_embedding(num_deprels) if config['use_trees'] else None
 
         self.mention_token_attn = self.make_ffnn(self.bert_emb_size, 0, output_size=1) if config['model_heads'] else None
         self.span_emb_score_ffnn = self.make_ffnn(self.span_emb_size, [config['ffnn_size']] * config['ffnn_depth'], output_size=1)
@@ -166,7 +168,10 @@ class CorefModel(nn.Module):
                 self.span2head_ffnn = self.make_ffnn(self.span_emb_size, config["ffnn_size"], output_size=self.max_span_width)
         if config["use_push_pop_detection"] and instructions is not None:
             self.push_pop_ffnn = self.make_ffnn(self.bert_emb_size, config["ffnn_size"], output_size=len(instructions))
+            if config["use_crf"]:
+                self.crf = CRF(len(instructions), batch_first=True)
         self.instructions = instructions
+        self.subtoken_map = subtoken_map
         self.update_steps = 0  # Internal use for debug
         self.debug = True
 
@@ -212,8 +217,9 @@ class CorefModel(nn.Module):
 
     def extract_spans_from_push_pop(self, instructions):
         span_starts, span_ends = [], []
-        instructions = [self.instructions[instruction - 1].split(",") if instruction > 0 else [] for instruction in instructions]
+        instructions = [self.instructions[instruction].split(",") if instruction > 0 else [] for instruction in instructions]
         stack = []
+        invalid = False
         for i, ins in enumerate(instructions):
             for instruction in ins[1:]:
                 if instruction == "PUSH":
@@ -223,10 +229,13 @@ class CorefModel(nn.Module):
                 else:
                     stack_index = int(instruction.split(":")[-1])
                     if stack_index > len(stack):
-                        logger.warning("Invalid stack instruction: POP before PUSH.")
+                        # logger.warning("Invalid stack instruction: POP before PUSH.")
+                        invalid = True
                         continue
                     span_ends[stack[-stack_index]] = i
                     stack.pop(-stack_index)
+        if invalid:
+            logger.warning("Invalid stack instruction: POP before PUSH.")
         return torch.tensor(span_starts, device=self.device), torch.tensor(span_ends, device=self.device)
 
     def get_predictions_and_loss(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
@@ -349,13 +358,18 @@ class CorefModel(nn.Module):
         selected_idx = torch.tensor(selected_idx_cpu, device=device)
         if self.config["use_push_pop_detection"]:
             instructions_logits = self.push_pop_ffnn(mention_doc)
-            pp_span_starts, pp_span_ends = self.extract_spans_from_push_pop(torch.argmax(instructions_logits.cpu(), dim=-1))
-            equal_starts = torch.unsqueeze(candidate_starts, dim=0) == torch.unsqueeze(pp_span_starts, dim=1)
-            equal_ends = torch.unsqueeze(candidate_ends, dim=0) == torch.unsqueeze(pp_span_ends, dim=1)
-            selected_idx_pp = torch.any((equal_starts & equal_ends), dim=0)
-            selected_idx_pp[selected_idx] = True
-            selected_idx = selected_idx_pp
-            num_top_spans = torch.sum(selected_idx)
+            if not is_training or conf["push_pop_decode_during_training"]:
+                if conf["use_crf"] and (not is_training or conf["crf_decode_during_training"]):
+                    instructions_indices = torch.squeeze(torch.tensor(self.crf.decode(torch.unsqueeze(instructions_logits, dim=0)))).to(self.device)
+                else:
+                    instructions_indices = torch.argmax(instructions_logits, dim=-1)
+                pp_span_starts, pp_span_ends = self.extract_spans_from_push_pop(instructions_indices.cpu())
+                equal_starts = torch.unsqueeze(candidate_starts, dim=0) == torch.unsqueeze(pp_span_starts, dim=1)
+                equal_ends = torch.unsqueeze(candidate_ends, dim=0) == torch.unsqueeze(pp_span_ends, dim=1)
+                selected_idx_pp = torch.any((equal_starts & equal_ends), dim=0)
+                selected_idx_pp[selected_idx] = True
+                selected_idx = selected_idx_pp
+                num_top_spans = torch.sum(selected_idx)
         top_span_starts, top_span_ends = candidate_starts[selected_idx], candidate_ends[selected_idx]
         top_span_emb = candidate_span_emb[selected_idx]
         if conf["span2head"]:
@@ -600,9 +614,13 @@ class CorefModel(nn.Module):
                 gold_heads = (top_span_heads > 0).sum()
                 gold_heads2 = (top_span_head_offsets >= 0).sum()
         if conf["use_push_pop_detection"]:
-            pp_loss_fn = torch.nn.CrossEntropyLoss()
-            pp_loss = pp_loss_fn(torch.transpose(instructions_logits, -1, 1), instructions)
-            loss += 100 * pp_loss
+            if conf["use_crf"]:
+                log_likelihood = self.crf(torch.unsqueeze(instructions_logits[instructions >= 0, :], dim=0), torch.unsqueeze(instructions[instructions >= 0], dim=0), reduction="token_mean")
+                pp_loss = 0 - log_likelihood
+            else:
+                pp_loss_fn = torch.nn.CrossEntropyLoss()
+                pp_loss = pp_loss_fn(torch.transpose(instructions_logits, -1, 1), instructions)
+            loss += 1000 * pp_loss
         # Debug
         if self.debug:
             if self.update_steps % 20 == 0:

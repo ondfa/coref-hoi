@@ -159,10 +159,13 @@ class Runner:
         stored_info = self.data.get_stored_info()
         if model is None:
             instructions = None
+            deprels = None
             if conf["use_push_pop_detection"]:
                 instructions = sorted(stored_info["instructions_dict"].items(), key=lambda entry: entry[1])[1:]
                 instructions = [ins[0] for ins in instructions]
-            model = self.initialize_model(instructions=instructions)
+                deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])[1:]
+                deprels = [rel[0] for rel in deprels]
+            model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels)
         logger.info('Model parameters:')
         for name, param in model.named_parameters():
             logger.info('%s: %s' % (name, tuple(param.shape)))
@@ -194,6 +197,7 @@ class Runner:
             for doc_key, example in examples_train:
                 # Forward pass
                 model.train()
+                model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
                 example_gpu = [d.to(self.device) for d in example]
                 torch.cuda.empty_cache
                 _, loss = model(*example_gpu)
@@ -317,8 +321,9 @@ class Runner:
         model.eval()
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
+            model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
             gold_clusters = stored_info['gold'][doc_key]
-            tensor_example = tensor_example[:10]  # Strip out gold
+            tensor_example = tensor_example[:-4]  # Strip out gold
             num_sentences = tensor_example[0].shape[0]
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
