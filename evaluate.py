@@ -17,7 +17,8 @@ def evaluate(config_name, gpu_id, saved_suffix):
     if runner.config["use_push_pop_detection"]:
         instructions = sorted(runner.data.stored_info["instructions_dict"].items(), key=lambda entry: entry[1])[1:]
         instructions = [ins[0] for ins in instructions]
-        deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])[1:]
+    if runner.config["use_trees"]:
+        deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])
         deprels = [rel[0] for rel in deprels]
     # find_cross_example_coreference(examples_dev)
     if saved_suffix == "last":

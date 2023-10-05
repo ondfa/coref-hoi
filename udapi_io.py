@@ -1,3 +1,5 @@
+import logging
+
 import udapi
 import udapi.core
 from udapi.block.corefud.movehead import MoveHead
@@ -9,19 +11,27 @@ from udapi.core.coref import CorefEntity
 def read_data(file):
     move_head = MoveHead()
     docs = ConlluReader(files=file, split_docs=True).read_documents()
+    level = logging.getLogger().level
+    logging.getLogger().setLevel(logging.ERROR)
     for doc in docs:
         move_head.run(doc)
+    logging.getLogger().setLevel(level)
     return docs
 
 def write_data(docs, f):
+    level = logging.getLogger().level
+    logging.getLogger().setLevel(logging.ERROR)
     writer = ConlluWriter(filehandle=f)
     for doc in docs:
         writer.before_process_document(doc)
         writer.process_document(doc)
     # writer.after_process_document(None)
+    logging.getLogger().setLevel(level)
 
 
 def map_to_udapi(udapi_docs, predictions, subtoken_map, doc_span_to_head=None):
+    level = logging.getLogger().level
+    logging.getLogger().setLevel(logging.ERROR)
     entities = 1
     udapi_docs_map = {doc.meta["docname"]: doc for doc in udapi_docs}
     docs = []
@@ -49,6 +59,7 @@ def map_to_udapi(udapi_docs, predictions, subtoken_map, doc_span_to_head=None):
         move_head.run(doc)
         udapi.core.coref.store_coref_to_misc(doc)
         docs.append(doc)
+    logging.getLogger().setLevel(level)
     return docs
 
 

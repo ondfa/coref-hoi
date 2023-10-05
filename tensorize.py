@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class CorefDataProcessor:
-    def __init__(self, config, language='english'):
+    def __init__(self, config, language=None):
+        if language is None:
+            language = config["language"]
         self.config = config
         self.language = language
         self.empty_suffix = ".empty" if config["solve_empty_nodes"] else ""
@@ -36,7 +38,7 @@ class CorefDataProcessor:
             if "load_model_from_exp" in self.config:
                 parent_config = util.initialize_config(config["load_model_from_exp"])
                 parent_config["use_cache"] = True
-                parent_data = CorefDataProcessor(parent_config)
+                parent_data = CorefDataProcessor(parent_config, language=parent_config["language"])
                 tensorizer = Tensorizer(self.config, stored_info=parent_data.stored_info)
             else:
                 tensorizer = Tensorizer(self.config)

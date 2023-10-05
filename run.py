@@ -163,7 +163,8 @@ class Runner:
             if conf["use_push_pop_detection"]:
                 instructions = sorted(stored_info["instructions_dict"].items(), key=lambda entry: entry[1])[1:]
                 instructions = [ins[0] for ins in instructions]
-                deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])[1:]
+            if conf["use_trees"]:
+                deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])
                 deprels = [rel[0] for rel in deprels]
             model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels)
         logger.info('Model parameters:')
@@ -240,8 +241,9 @@ class Runner:
                         tb_writer.add_scalar('Learning_Rate_Task', schedulers[1].get_last_lr()[-1], len(loss_history))
                     example_gpu = [e.detach().cpu() for e in example_gpu]
                     # Evaluate
-                    if len(loss_history) > 0 and len(loss_history) % conf['eval_frequency'] == 0:
+                    if (len(loss_history) > 0 or conf['evaluate_first']) and len(loss_history) % conf['eval_frequency'] == 0:
                         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
+                        torch.cuda.empty_cache()
                         if f1 > max_f1:
                             max_f1 = f1
                             new_path = self.save_model_checkpoint(model, len(loss_history))
@@ -265,7 +267,7 @@ class Runner:
             logger.info('**********Dev eval**********')
             self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_eval_path'], save_predictions=True, phase="best_model_eval")
             logger.info('**********Test eval**********')
-            self.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_test")
+            self.evaluate(model, examples_test, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_test")
         # Wrap up
         tb_writer.close()
         return loss_history
@@ -319,6 +321,7 @@ class Runner:
         doc_span_to_head = {}
 
         model.eval()
+        torch.cuda.empty_cache()
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
