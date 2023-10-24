@@ -283,7 +283,7 @@ class Tensorizer:
         num_sentences = input_ids.shape[0]
         offset = 0
         splits = []
-        while offset + max_sentences - 1 < num_sentences:
+        while offset< num_sentences:
             splits.append(self.truncate_example(input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
                                                 is_training, parents, deprels, instructions, heads, gold_starts, gold_ends,
                                                 gold_mention_cluster_map, sentence_offset=offset))
