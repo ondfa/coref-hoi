@@ -333,7 +333,6 @@ class Runner:
             else:
                 batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=1 if self.config["max_segment_overlap"] else None)
                 if self.config["max_segment_overlap"]:
-                    max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
                     batch_examples = batch_examples[:-max_sentences]
             predicted_clusters = []
             mention_to_cluster_id = {}

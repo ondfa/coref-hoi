@@ -4,7 +4,8 @@ import math
 
 import torch
 import torch.nn as nn
-from torchcrf import CRF
+# from torchcrf import CRF
+from TorchCRF import CRF
 from transformers import AutoConfig, AutoModel
 import util
 import logging
@@ -70,6 +71,28 @@ def average_models(original_weights, new_weights):
 positional_mapping_types = {"random": create_positional_embeddings_random, "repeated": create_positional_embeddings_repeated, "linproj": create_positional_embeddings_lin_proj, "original": create_positional_embeddings_original}
 
 
+def get_depths(parents):
+    depths = -1 * torch.ones_like(parents)
+    num_words = len(parents)
+    i = 0
+    local_parents = torch.clone(parents)
+    while torch.any((local_parents > 0) & (local_parents < num_words)):
+        depths[((local_parents == -1) | (local_parents == num_words)) & (depths == -1)] = i
+        i += 1
+        local_parents[(local_parents >= 0) & (local_parents < num_words)] = local_parents[local_parents[(local_parents >= 0) & (local_parents < num_words)]]
+    depths[depths == -1] = i
+    return depths
+
+
+def get_heads(depths, starts, ends, max_span_len):
+    indices = torch.unsqueeze(torch.arange(max_span_len), dim=0).repeat([starts.shape[0], 1])
+    indices += torch.unsqueeze(starts, dim=1)
+    indices[indices > torch.unsqueeze(ends, dim=1).repeat([1, indices.shape[1]])] = -1
+    depths_ext = torch.cat([depths, torch.tensor([1000])])
+    return indices[torch.arange(starts.shape[0]), torch.argmin(depths_ext[indices], dim=1)]
+
+
+
 class CorefModel(nn.Module):
     def __init__(self, config, device, num_genres=None, instructions=None, subtoken_map=None, deprels=None):
         super().__init__()
@@ -122,6 +145,10 @@ class CorefModel(nn.Module):
         self.span_emb_size = self.bert_emb_size * 3
         if config['use_features']:
             self.span_emb_size += config['feature_emb_size']
+        if config["add_span_head"]:
+            self.span_emb_size += self.bert_emb_size
+        if config["heads_only"]:
+            self.span_emb_size = self.bert_emb_size
         if config['use_trees']:
             self.trees_output_size = self.bert_emb_size
             # self.span_emb_size += self.trees_output_size
@@ -169,7 +196,8 @@ class CorefModel(nn.Module):
         if config["use_push_pop_detection"] and instructions is not None:
             self.push_pop_ffnn = self.make_ffnn(self.bert_emb_size, config["ffnn_size"], output_size=len(instructions))
             if config["use_crf"]:
-                self.crf = CRF(len(instructions), batch_first=True)
+                # self.crf = CRF(len(instructions), batch_first=True)
+                self.crf = CRF(len(instructions), use_gpu=False)
         self.instructions = instructions
         self.subtoken_map = subtoken_map
         self.update_steps = 0  # Internal use for debug
@@ -323,28 +351,35 @@ class CorefModel(nn.Module):
 
         # Get span embedding
         span_start_emb, span_end_emb = mention_doc[candidate_starts], mention_doc[candidate_ends]
-        candidate_emb_list = [span_start_emb, span_end_emb]
-        if conf['use_features']:
-            candidate_width_idx = candidate_ends - candidate_starts
-            candidate_width_emb = self.emb_span_width(candidate_width_idx)
-            candidate_width_emb = self.dropout(candidate_width_emb)
-            candidate_emb_list.append(candidate_width_emb)
-        # Use attended head or avg token
-        candidate_tokens = torch.unsqueeze(torch.arange(0, num_words, device=device), 0).repeat(num_candidates, 1)
-        candidate_tokens_mask = (candidate_tokens >= torch.unsqueeze(candidate_starts, 1)) & (candidate_tokens <= torch.unsqueeze(candidate_ends, 1))
-        if conf['model_heads']:
-            token_attn = torch.squeeze(self.mention_token_attn(mention_doc), 1)
+        if conf["heads_only"]:
+            candidate_span_emb = span_start_emb
         else:
-            token_attn = torch.ones(num_words, dtype=torch.float, device=device)  # Use avg if no attention
-        candidate_tokens_attn_raw = torch.log(candidate_tokens_mask.to(torch.float)) + torch.unsqueeze(token_attn, 0)
-        candidate_tokens_attn = nn.functional.softmax(candidate_tokens_attn_raw, dim=1)
-        head_attn_emb = torch.matmul(candidate_tokens_attn, mention_doc)
-        candidate_emb_list.append(head_attn_emb)
-        candidate_span_emb = torch.cat(candidate_emb_list, dim=1)  # [num candidates, new emb size]
+            candidate_emb_list = [span_start_emb, span_end_emb]
+            if conf["add_span_head"]:
+                candidate_depths = get_depths(parents[:, 0])
+                candidate_heads = get_heads(candidate_depths, candidate_starts, candidate_ends, conf["max_span_width"])
+                candidate_emb_list.append(mention_doc[candidate_heads])
+            if conf['use_features']:
+                candidate_width_idx = candidate_ends - candidate_starts
+                candidate_width_emb = self.emb_span_width(candidate_width_idx)
+                candidate_width_emb = self.dropout(candidate_width_emb)
+                candidate_emb_list.append(candidate_width_emb)
+            # Use attended head or avg token
+            candidate_tokens = torch.unsqueeze(torch.arange(0, num_words, device=device), 0).repeat(num_candidates, 1)
+            candidate_tokens_mask = (candidate_tokens >= torch.unsqueeze(candidate_starts, 1)) & (candidate_tokens <= torch.unsqueeze(candidate_ends, 1))
+            if conf['model_heads']:
+                token_attn = torch.squeeze(self.mention_token_attn(mention_doc), 1)
+            else:
+                token_attn = torch.ones(num_words, dtype=torch.float, device=device)  # Use avg if no attention
+            candidate_tokens_attn_raw = torch.log(candidate_tokens_mask.to(torch.float)) + torch.unsqueeze(token_attn, 0)
+            candidate_tokens_attn = nn.functional.softmax(candidate_tokens_attn_raw, dim=1)
+            head_attn_emb = torch.matmul(candidate_tokens_attn, mention_doc)
+            candidate_emb_list.append(head_attn_emb)
+            candidate_span_emb = torch.cat(candidate_emb_list, dim=1)  # [num candidates, new emb size]
 
         # Get span score
         candidate_mention_scores = torch.squeeze(self.span_emb_score_ffnn(candidate_span_emb), 1)
-        if conf['use_width_prior']:
+        if conf['use_width_prior'] and not conf["heads_only"]:
             width_score = torch.squeeze(self.span_width_score_ffnn(self.emb_span_width_prior.weight), 1)
             candidate_width_score = width_score[candidate_width_idx]
             candidate_mention_scores += candidate_width_score
@@ -360,14 +395,16 @@ class CorefModel(nn.Module):
             instructions_logits = self.push_pop_ffnn(mention_doc)
             if not is_training or conf["push_pop_decode_during_training"]:
                 if conf["use_crf"] and (not is_training or conf["crf_decode_during_training"]):
-                    instructions_indices = torch.squeeze(torch.tensor(self.crf.decode(torch.unsqueeze(instructions_logits, dim=0)))).to(self.device)
+                    # instructions_indices = torch.squeeze(torch.tensor(self.crf.decode(torch.unsqueeze(instructions_logits, dim=0)))).to(self.device)
+                    instructions_indices = torch.squeeze(torch.tensor(self.crf.viterbi_decode(torch.unsqueeze(instructions_logits.cpu(), dim=0), mask=torch.ones([1, instructions_logits.shape[1]], dtype=bool))))
                 else:
                     instructions_indices = torch.argmax(instructions_logits, dim=-1)
                 pp_span_starts, pp_span_ends = self.extract_spans_from_push_pop(instructions_indices.cpu())
                 equal_starts = torch.unsqueeze(candidate_starts, dim=0) == torch.unsqueeze(pp_span_starts, dim=1)
                 equal_ends = torch.unsqueeze(candidate_ends, dim=0) == torch.unsqueeze(pp_span_ends, dim=1)
                 selected_idx_pp = torch.any((equal_starts & equal_ends), dim=0)
-                selected_idx_pp[selected_idx] = True
+                if not conf["push_pop_only"]:
+                    selected_idx_pp[selected_idx] = True
                 selected_idx = selected_idx_pp
                 num_top_spans = torch.sum(selected_idx)
         top_span_starts, top_span_ends = candidate_starts[selected_idx], candidate_ends[selected_idx]
@@ -615,8 +652,8 @@ class CorefModel(nn.Module):
                 gold_heads2 = (top_span_head_offsets >= 0).sum()
         if conf["use_push_pop_detection"]:
             if conf["use_crf"]:
-                log_likelihood = self.crf(torch.unsqueeze(instructions_logits[instructions >= 0, :], dim=0), torch.unsqueeze(instructions[instructions >= 0], dim=0), reduction="token_mean")
-                pp_loss = 0 - log_likelihood
+                log_likelihood = self.crf.forward(torch.unsqueeze(instructions_logits, dim=0), torch.unsqueeze(instructions, dim=0), mask=torch.ones_like(torch.unsqueeze(instructions_logits, dim=0), dtype=bool))
+                pp_loss = 0 - torch.mean(log_likelihood)
             else:
                 pp_loss_fn = torch.nn.CrossEntropyLoss()
                 pp_loss = pp_loss_fn(torch.transpose(instructions_logits, -1, 1), instructions)

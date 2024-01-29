@@ -9,3 +9,4 @@ tensorboard
 wandb
 udapi
 pytorch-crf
+TorchCRF
