@@ -89,7 +89,7 @@ def evaluate_coreud(gold_path, pred_path):
 class Runner:
     def __init__(self, config_name, gpu_id=0, seed=None):
         self.name = config_name
-        self.name_suffix = datetime.now().strftime('%b%d_%H-%M-%S')
+        self.name_suffix = datetime.now().strftime('%y%b%d_%H-%M-%S')
         self.gpu_id = gpu_id
         self.seed = seed
 
@@ -241,7 +241,7 @@ class Runner:
                         tb_writer.add_scalar('Learning_Rate_Task', schedulers[1].get_last_lr()[-1], len(loss_history))
                     example_gpu = [e.detach().cpu() for e in example_gpu]
                     # Evaluate
-                    if (len(loss_history) > 0 or conf['evaluate_first']) and len(loss_history) % conf['eval_frequency'] == 0:
+                    if (len(loss_history) > 0 or conf['evaluate_first']) and len(loss_history) % conf['eval_frequency'] == 1:
                         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
                         torch.cuda.empty_cache()
                         if f1 > max_f1:
@@ -521,7 +521,13 @@ class Runner:
         return path_ckpt
 
     def load_model_checkpoint(self, model, suffix):
-        path_ckpt = join(self.config['log_dir'], f'model_{suffix}.bin')
+        if len(suffix.split("_")) == 2:  # Iteration number missing, add the latest automatically
+            import glob
+            models = glob.glob(join(self.config["log_dir"], f'model_{suffix}_*'))
+            models.sort(key=cmp_to_key(compare_models))
+            path_ckpt = models[-1]
+        else:
+            path_ckpt = join(self.config['log_dir'], f'model_{suffix}.bin')
         model.load_state_dict(torch.load(path_ckpt, map_location=torch.device('cpu')), strict=False)
         logger.info('Loaded model from %s' % path_ckpt)
 
@@ -530,7 +536,14 @@ class Runner:
         config = util.initialize_config(experiment_name)
         dir = config["log_dir"]
         if "model_suffix" in self.config:
-            path_ckpt = join(config['log_dir'], f'model_{self.config["model_suffix"]}.bin')
+            suffix = self.config["model_suffix"]
+            if len(suffix.split("_")) == 2:  # Iteration number missing, add the latest automatically
+                import glob
+                models = glob.glob(join(config["log_dir"], f'model_{suffix}_*'))
+                models.sort(key=cmp_to_key(compare_models))
+                path_ckpt = models[-1]
+            else:
+                path_ckpt = join(config['log_dir'], f'model_{suffix}.bin')
             model.load_state_dict(torch.load(path_ckpt, map_location=torch.device('cpu')), strict=False)
             logger.info('Loaded model from %s' % path_ckpt)
         else:
@@ -542,8 +555,14 @@ class Runner:
 def compare_models(m1, m2):
     split1 = m1.split("/")[-1].split("_")
     split2 = m2.split("/")[-1].split("_")
-    d1 = datetime.strptime(split1[1] + "_" + split1[2], '%b%d_%H-%M-%S')
-    d2 = datetime.strptime(split2[1] + "_" + split2[2], '%b%d_%H-%M-%S')
+    try:
+        d1 = datetime.strptime(split1[1] + "_" + split1[2], '%y%b%d_%H-%M-%S')
+    except ValueError:
+        d1 = datetime.strptime("23" + split1[1] + "_" + split1[2], '%y%b%d_%H-%M-%S')
+    try:
+    	d2 = datetime.strptime(split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
+    except ValueError:
+        d2 = datetime.strptime("23" + split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
     if d1 == d2:
         return 1 if split1[3] > split2[3] else -1
     else:

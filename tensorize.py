@@ -19,7 +19,7 @@ class CorefDataProcessor:
             language = config["language"]
         self.config = config
         self.language = language
-        self.empty_suffix = ".empty" if config["solve_empty_nodes"] else ""
+        self.empty_suffix = ".empty" if config["solve_empty_nodes"] else "sysempty" if config["system_empty_nodes"] else ""
 
         self.max_seg_len = config['max_segment_len']
         self.max_training_seg = config['max_training_sentences']
@@ -31,11 +31,12 @@ class CorefDataProcessor:
             # Load cached tensors if exists
             with open(cache_path, 'rb') as f:
                 self.tensor_samples, self.stored_info = pickle.load(f)
-                logger.info('Loaded tensorized examples from cache')
+                logger.info('Loaded tensorized examples from cache: ' + cache_path)
         else:
             # Generate tensorized samples
             self.tensor_samples = {}
-            if "load_model_from_exp" in self.config:
+            if "load_model_from_exp" in self.config and config["load_model_from_exp"]:
+                print("loading parent data...")
                 parent_config = util.initialize_config(config["load_model_from_exp"])
                 parent_config["use_cache"] = True
                 parent_data = CorefDataProcessor(parent_config, language=parent_config["language"])
@@ -43,9 +44,9 @@ class CorefDataProcessor:
             else:
                 tensorizer = Tensorizer(self.config)
             paths = {
-                'trn': join(self.data_dir, f'{language}-train.{self.max_seg_len}{self.empty_suffix}.jsonlines'),
-                'dev': join(self.data_dir, f'{language}-dev.{self.max_seg_len}{self.empty_suffix}.jsonlines'),
-                'tst': join(self.data_dir, f'{language}-test.{self.max_seg_len}{self.empty_suffix}.jsonlines')
+                'trn': join(self.data_dir, f'{language}-train.{config["max_train_segment_len"] if "max_train_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines'),
+                'dev': join(self.data_dir, f'{language}-dev.{config["max_dev_segment_len"] if "max_dev_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines'),
+                'tst': join(self.data_dir, f'{language}-test.{config["max_test_segment_len"] if "max_test_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines')
             }
             for split, path in paths.items():
                 logger.info('Tensorizing examples from %s; results will be cached)' % path)
@@ -243,7 +244,7 @@ class Tensorizer:
     def truncate_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
                          parents, deprels, instructions, heads=None,
                          gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
-        max_sentences = self.config["max_training_sentences"]
+        max_sentences = self.config["max_training_sentences"] if is_training or "max_pred_sentences" not in self.config else self.config["max_pred_sentences"] 
         num_sentences = input_ids.shape[0]
         assert num_sentences > max_sentences
 

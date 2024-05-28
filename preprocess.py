@@ -368,7 +368,7 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
         prev_token_idx = subtoken_map[-1]
 
 
-def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, solve_empty_nodes=True):
+def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, solve_empty_nodes=True, system_empty_nodes=False):
     """ Process raw input to finalized documents """
     document_state = DocumentState(doc_key)
     word_idx = -1
@@ -380,7 +380,9 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, sol
             document_state.sentence_end[-1] = True
             # assert len(row) >= 12
         word_idx += 1
-        if node.lemma.startswith("#") and solve_empty_nodes:
+        if system_empty_nodes:
+            word = "_"
+        elif node.lemma.startswith("#") and solve_empty_nodes:
             word = normalize_word(node.form, language) + node.lemma  # Lemma (node type) added for empty nodes
         else:
             word = normalize_word(node.form, language)
@@ -408,8 +410,10 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, sol
 
 
 def minimize_partition(partition, extension, args, tokenizer):
-    input_path = os.path.join(args.data_dir, '..', f'{args.language}-{partition}.{extension}')
-    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{args.max_segment_len}{".empty" if args.solve_empty_nodes else ""}.jsonlines')
+    seg_len = args.max_segment_len if f"max_{partition}_segment_len" not in args else args[f"max_{partition}_segment_len"]
+    input_path = os.path.join(args.data_dir, '..' + ("/sysempty" if args.system_empty_nodes else ""), f'{args.language}-{partition}.{extension}')
+    print(input_path)
+    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{seg_len}{".empty" if args.solve_empty_nodes else ".sysempty" if args.system_empty_nodes else ""}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
 
@@ -424,7 +428,7 @@ def minimize_partition(partition, extension, args, tokenizer):
         else:
             udapi_documents = udapi_io.read_data(input_path)
         for doc in udapi_documents:
-            document = get_document(doc.meta["docname"], args.language, args.max_segment_len, tokenizer, udapi_documents[doc_count], args.solve_empty_nodes)
+            document = get_document(doc.meta["docname"], args.language, seg_len, tokenizer, udapi_documents[doc_count], args.solve_empty_nodes, args.system_empty_nodes)
             output_file.write(json.dumps(document))
             output_file.write('\n')
             doc_count += 1
@@ -437,7 +441,6 @@ def minimize_language(args):
     # minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
     # minimize_partition('test', 'v4_gold_conll', args, tokenizer)
     # minimize_partition('train', 'v4_gold_conll', args, tokenizer)
-
 
     minimize_partition('test', 'conllu', args, tokenizer)
     minimize_partition('dev', 'conllu', args, tokenizer)

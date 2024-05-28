@@ -85,11 +85,11 @@ def get_depths(parents):
 
 
 def get_heads(depths, starts, ends, max_span_len):
-    indices = torch.unsqueeze(torch.arange(max_span_len), dim=0).repeat([starts.shape[0], 1])
+    indices = torch.unsqueeze(torch.arange(max_span_len, device=starts.device), dim=0).repeat([starts.shape[0], 1])
     indices += torch.unsqueeze(starts, dim=1)
     indices[indices > torch.unsqueeze(ends, dim=1).repeat([1, indices.shape[1]])] = -1
-    depths_ext = torch.cat([depths, torch.tensor([1000])])
-    return indices[torch.arange(starts.shape[0]), torch.argmin(depths_ext[indices], dim=1)]
+    depths_ext = torch.cat([depths, torch.tensor([1000], device=depths.device)])
+    return indices[torch.arange(starts.shape[0], device=indices.device), torch.argmin(depths_ext[indices], dim=1)]
 
 
 
@@ -245,7 +245,7 @@ class CorefModel(nn.Module):
 
     def extract_spans_from_push_pop(self, instructions):
         span_starts, span_ends = [], []
-        instructions = [self.instructions[instruction].split(",") if instruction > 0 else [] for instruction in instructions]
+        instructions = [self.instructions[instruction-1].split(",") if instruction > 0 else [] for instruction in instructions]
         stack = []
         invalid = False
         for i, ins in enumerate(instructions):
@@ -356,6 +356,9 @@ class CorefModel(nn.Module):
         else:
             candidate_emb_list = [span_start_emb, span_end_emb]
             if conf["add_span_head"]:
+                if not conf["use_trees"]:
+                    parents = torch.transpose(parents, 1, 2)[input_mask]
+                    parents[(parents < 0) | (parents > num_words)] = num_words
                 candidate_depths = get_depths(parents[:, 0])
                 candidate_heads = get_heads(candidate_depths, candidate_starts, candidate_ends, conf["max_span_width"])
                 candidate_emb_list.append(mention_doc[candidate_heads])
@@ -403,7 +406,7 @@ class CorefModel(nn.Module):
                 equal_starts = torch.unsqueeze(candidate_starts, dim=0) == torch.unsqueeze(pp_span_starts, dim=1)
                 equal_ends = torch.unsqueeze(candidate_ends, dim=0) == torch.unsqueeze(pp_span_ends, dim=1)
                 selected_idx_pp = torch.any((equal_starts & equal_ends), dim=0)
-                if not conf["push_pop_only"]:
+                if not conf["push_pop_only"] or not torch.any(selected_idx_pp):
                     selected_idx_pp[selected_idx] = True
                 selected_idx = selected_idx_pp
                 num_top_spans = torch.sum(selected_idx)

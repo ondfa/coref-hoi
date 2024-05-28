@@ -22,7 +22,7 @@ def evaluate(config_name, gpu_id, saved_suffix):
         deprels = [rel[0] for rel in deprels]
     # find_cross_example_coreference(examples_dev)
     if saved_suffix == "last":
-        if "load_model_from_exp" in runner.config and runner.config["load_model_from_exp"]:
+        if "load_model_from_exp" in runner.config and runner.config["eval_parent"]:
             exp = runner.config["load_model_from_exp"]
         else:
             exp = runner.name
