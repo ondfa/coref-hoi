@@ -179,7 +179,7 @@ class Tensorizer:
         sentences = example['sentences']  # Segments
         sentence_map = example['sentence_map']
         num_words = sum([len(s) for s in sentences])
-        max_sentence_len = self.config['max_segment_len']
+        max_sentence_len = self.config["max_train_segment_len"] if "max_train_segment_len" in self.config and is_training else self.config['max_segment_len']
         sentence_len = np.array([len(s) for s in sentences])
 
         # Bert input

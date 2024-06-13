@@ -2,11 +2,13 @@ torch
 torchvision
 transformers
 numpy
-scikit-learn==0.22.2
+scikit-learn
 pyhocon
 graphviz
-tensorboard
 wandb
 udapi
 pytorch-crf
 TorchCRF
+sentencepiece
+protobuf
+peft

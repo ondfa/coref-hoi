@@ -14,7 +14,6 @@ import tempfile
 import numpy as np
 import torch
 import wandb
-from torch.utils.tensorboard import SummaryWriter
 from transformers import AdamW
 from torch.optim import Adam, SGD
 
@@ -27,7 +26,6 @@ from metrics import CorefEvaluator
 from datetime import datetime
 from torch.optim.lr_scheduler import LambdaLR
 from model import CorefModel
-import conll
 import sys
 # import tensorflow as tf
 
@@ -149,7 +147,6 @@ class Runner:
 
         # Set up tensorboard
         tb_path = join(conf['tb_dir'], self.name + '_' + self.name_suffix)
-        tb_writer = SummaryWriter(tb_path, flush_secs=30)
         logger.info('Tensorboard summary path: %s' % tb_path)
 
         # Set up data
@@ -166,11 +163,25 @@ class Runner:
             if conf["use_trees"]:
                 deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])
                 deprels = [rel[0] for rel in deprels]
-            model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels)
+            bert_device = conf["bert_device"] if "bert_device" in conf else None
+            float_dtype = torch.bfloat16 if conf["use_half_precision"] else float
+            model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels, bert_device=bert_device, dtype=float_dtype)
         logger.info('Model parameters:')
         for name, param in model.named_parameters():
             logger.info('%s: %s' % (name, tuple(param.shape)))
-        model.to(self.device)
+        logger.info(f"Total parameters {sum([np.prod(param.shape) for param in model.parameters()])}")
+        if runner.config["use_half_precision"]:
+            model.to(device=self.device, dtype=torch.bfloat16)
+            model.bert.to(device=model.bert_device, dtype=torch.bfloat16)
+        else:
+            model.to(self.device)
+            model.bert.to(model.bert_device)
+        if runner.config["pipeline_parallel"]:
+            device_map = {
+                0: list(range(4)),
+                1: list(range(4, 24)),
+            }
+            model.bert.parallelize(device_map)
 
         # Set up optimizer and scheduler
         total_update_steps = len(examples_train) * epochs // grad_accum
@@ -236,13 +247,10 @@ class Runner:
                                     (len(loss_history), avg_loss, conf['report_frequency'] / (end_time - start_time)))
                         start_time = end_time
                         wandb.log({"train_loss": avg_loss, "lr_bert": schedulers[0].get_last_lr()[0], "lr_task": schedulers[1].get_last_lr()[-1], "epoch": epo})
-                        tb_writer.add_scalar('Training_Loss', avg_loss, len(loss_history))
-                        tb_writer.add_scalar('Learning_Rate_Bert', schedulers[0].get_last_lr()[0], len(loss_history))
-                        tb_writer.add_scalar('Learning_Rate_Task', schedulers[1].get_last_lr()[-1], len(loss_history))
                     example_gpu = [e.detach().cpu() for e in example_gpu]
                     # Evaluate
-                    if (len(loss_history) > 0 or conf['evaluate_first']) and len(loss_history) % conf['eval_frequency'] == 1:
-                        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
+                    if (len(loss_history) > 1 or conf['evaluate_first']) and len(loss_history) % conf['eval_frequency'] == 1:
+                        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'])
                         torch.cuda.empty_cache()
                         if f1 > max_f1:
                             max_f1 = f1
@@ -257,10 +265,10 @@ class Runner:
         logger.info('**********Finished training**********')
         logger.info('Actual update steps: %d' % len(loss_history))
         logger.info('**********Dev eval**********')
-        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'], tb_writer=tb_writer)
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'])
         logger.info('**********Test eval**********')
         #TODO test data eval
-        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], tb_writer=tb_writer, save_predictions=True, phase="test")
+        f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="test")
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
             self.load_model_checkpoint(model, best_model_path[best_model_path.rindex("model_") + 6: best_model_path.rindex(".bin")])
@@ -269,7 +277,6 @@ class Runner:
             logger.info('**********Test eval**********')
             self.evaluate(model, examples_test, stored_info, 0, official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="best_model_test")
         # Wrap up
-        tb_writer.close()
         return loss_history
 
     def find_cross_segment_coreference(self, examples, segment_len=1):
@@ -315,7 +322,9 @@ class Runner:
             udapi_io.write_data(gold_data, gold_fd)
             gold_fd.flush()
             conll_path = gold_fd.name
-        model.to(self.device)
+        if model.device != self.device:
+            model.to(self.device)
+            model.bert.to(model.bert_device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
         doc_span_to_head = {}
@@ -463,11 +472,13 @@ class Runner:
                 'weight_decay': 0.0
             }
         ]
-        optimizers = [
-            AdamW(grouped_bert_param, lr=self.config['bert_learning_rate'], eps=self.config['adam_eps']),
-            Adam(model.get_params()[1], lr=self.config['task_learning_rate'], eps=self.config['adam_eps'], weight_decay=0)
-            # SGD(model.get_params()[1], lr=self.config['task_learning_rate'], weight_decay=0)
-        ]
+        optimizers = []
+        if self.config["use_SGD"]:
+            optimizers.append(SGD(grouped_bert_param, lr=self.config['bert_learning_rate']))
+            optimizers.append(SGD(model.get_params()[1], lr=self.config['task_learning_rate'], weight_decay=0))
+        else:
+            optimizers.append(AdamW(grouped_bert_param, lr=self.config['bert_learning_rate'], eps=self.config['adam_eps']))
+            optimizers.append(Adam(model.get_params()[1], lr=self.config['task_learning_rate'], eps=self.config['adam_eps'], weight_decay=0))
         return optimizers
         # grouped_parameters = [
         #     {
@@ -572,5 +583,9 @@ if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
     runner = Runner(config_name, gpu_id)
     # model = runner.initialize_model()
-
-    runner.train(model=None)
+    if runner.config["use_half_precision"]:
+        from torch.cuda.amp import autocast
+        with autocast(dtype=torch.bfloat16):
+            runner.train(model=None)
+    else:
+        runner.train(model=None)

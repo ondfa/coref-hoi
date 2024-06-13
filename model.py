@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 # from torchcrf import CRF
 from TorchCRF import CRF
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, MT5EncoderModel
 import util
 import logging
 from typing import Iterable
@@ -94,10 +94,14 @@ def get_heads(depths, starts, ends, max_span_len):
 
 
 class CorefModel(nn.Module):
-    def __init__(self, config, device, num_genres=None, instructions=None, subtoken_map=None, deprels=None):
+    def __init__(self, config, device, bert_device=None, dtype=torch.float, num_genres=None, instructions=None, subtoken_map=None, deprels=None):
         super().__init__()
         self.config = config
         self.device = device
+        if bert_device is None:
+            bert_device = device
+        self.bert_device = bert_device
+        self.dtype = dtype
 
         self.num_genres = num_genres if num_genres else len(config['genres'])
         self.max_seg_len = config['max_segment_len']
@@ -108,38 +112,7 @@ class CorefModel(nn.Module):
 
         # Model
         self.dropout = nn.Dropout(p=config['dropout_rate'])
-        bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'])
-        bert_config.hidden_dropout_prob = config['bert_dropout_rate']
-        bert_config.attention_probs_dropout_prob = config['bert_dropout_rate']
-        model = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
-        bert_config.return_dict = False
-        if "bert_weights_name" in config:
-            bert_config.max_position_embeddings = config["max_segment_len"] + 2
-            weights_config = AutoConfig.from_pretrained(config["bert_weights_name"])
-            bert_config.vocab_size = weights_config.vocab_size
-            bert_config.type_vocab_size = weights_config.type_vocab_size
-            # weights_config.max_position_embeddings = config["max_segment_len"]
-            weightsModel = AutoModel.from_pretrained(config['bert_weights_name'], from_tf=config["from_tf"], config=weights_config)
-            state_dict = weightsModel.state_dict()
-            model_state_dict = model.state_dict()
-            if weights_config.max_position_embeddings < bert_config.max_position_embeddings:
-                # state_dict["embeddings.position_embeddings.weight"] = torch.cat((state_dict["embeddings.position_embeddings.weight"], torch.rand([bert_config.max_position_embeddings - weights_config.max_position_embeddings, weights_config.hidden_size])))
-                state_dict["embeddings.position_embeddings.weight"] = positional_mapping_types[config["positional_mapping_type"]](state_dict["embeddings.position_embeddings.weight"], model_state_dict["embeddings.position_embeddings.weight"])[:bert_config.max_position_embeddings,:]
-                # state_dict["embeddings.position_embeddings.weight"] = create_positional_embeddings_lin_proj(state_dict["embeddings.position_embeddings.weight"], model_state_dict["embeddings.position_embeddings.weight"])
-                state_dict["embeddings.position_ids"] = torch.tensor(range(0, bert_config.max_position_embeddings)).reshape([1, bert_config.max_position_embeddings])
-            self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=state_dict)
-        else:
-            self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
-
-
-        if "combine_with" in config:
-            new_config = AutoConfig.from_pretrained(config['combine_with'])
-            new_config.return_dict = False
-            new_model = AutoModel.from_pretrained(config['combine_with'], from_tf=config["from_tf"], config=new_config)
-            new_state_dict = new_model.state_dict()
-            old_state_dict = self.bert.state_dict()
-            new_state_dict = average_models(old_state_dict, new_state_dict)
-            self.bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=new_state_dict)
+        self.bert = self.init_bert(config)
 
         self.bert_emb_size = self.bert.config.hidden_size
         self.span_emb_size = self.bert_emb_size * 3
@@ -202,6 +175,59 @@ class CorefModel(nn.Module):
         self.subtoken_map = subtoken_map
         self.update_steps = 0  # Internal use for debug
         self.debug = True
+
+    def init_bert(self, config):
+        bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'])
+        bert_config.hidden_dropout_prob = config['bert_dropout_rate']
+        bert_config.attention_probs_dropout_prob = config['bert_dropout_rate']
+        if "mt5" in config['bert_pretrained_name_or_path'].lower():
+            model_class = MT5EncoderModel
+        else:
+            model_class = AutoModel
+        model = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
+        bert_config.return_dict = False
+        if "bert_weights_name" in config:
+            bert_config.max_position_embeddings = config["max_segment_len"] + 2
+            weights_config = AutoConfig.from_pretrained(config["bert_weights_name"])
+            bert_config.vocab_size = weights_config.vocab_size
+            bert_config.type_vocab_size = weights_config.type_vocab_size
+            # weights_config.max_position_embeddings = config["max_segment_len"]
+            weightsModel = model_class.from_pretrained(config['bert_weights_name'], from_tf=config["from_tf"], config=weights_config)
+            state_dict = weightsModel.state_dict()
+            model_state_dict = model.state_dict()
+            if weights_config.max_position_embeddings < bert_config.max_position_embeddings:
+                # state_dict["embeddings.position_embeddings.weight"] = torch.cat((state_dict["embeddings.position_embeddings.weight"], torch.rand([bert_config.max_position_embeddings - weights_config.max_position_embeddings, weights_config.hidden_size])))
+                state_dict["embeddings.position_embeddings.weight"] = positional_mapping_types[config["positional_mapping_type"]](state_dict["embeddings.position_embeddings.weight"], model_state_dict["embeddings.position_embeddings.weight"])[:bert_config.max_position_embeddings,:]
+                # state_dict["embeddings.position_embeddings.weight"] = create_positional_embeddings_lin_proj(state_dict["embeddings.position_embeddings.weight"], model_state_dict["embeddings.position_embeddings.weight"])
+                state_dict["embeddings.position_ids"] = torch.tensor(range(0, bert_config.max_position_embeddings)).reshape([1, bert_config.max_position_embeddings])
+            bert = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=state_dict)
+        else:
+            bert = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
+        if "combine_with" in config:
+            new_config = AutoConfig.from_pretrained(config['combine_with'])
+            new_config.return_dict = False
+            new_model = AutoModel.from_pretrained(config['combine_with'], from_tf=config["from_tf"], config=new_config)
+            new_state_dict = new_model.state_dict()
+            old_state_dict = bert.state_dict()
+            new_state_dict = average_models(old_state_dict, new_state_dict)
+            bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=new_state_dict)
+        if config["use_LORA"]:
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=32,
+                # target_modules=["q", "v"],
+                lora_dropout=0.05,
+                bias="none",
+                # task_type=TaskType.SEQ_2_SEQ_LM
+            )
+            if config["use_int8"]:
+                # prepare int-8 model for training
+                bert = prepare_model_for_kbit_training(bert)
+            # add LoRA adaptor
+            bert = get_peft_model(bert, lora_config)
+            bert.print_trainable_parameters()
+        return bert
 
     def make_embedding(self, dict_size, std=0.02, emb_size=None):
         if emb_size == None:
@@ -272,6 +298,7 @@ class CorefModel(nn.Module):
         """ Model and input are already on the device """
         device = self.device
         conf = self.config
+        dtype = self.dtype
 
         do_loss = False
         if gold_mention_cluster_map is not None:
@@ -280,7 +307,7 @@ class CorefModel(nn.Module):
             do_loss = True
 
         # Get token emb
-        mention_doc = self.bert(input_ids, attention_mask=input_mask)[0]  # [num seg, num max tokens, emb size]
+        mention_doc = self.bert(input_ids.to(self.bert_device), attention_mask=input_mask.to(self.bert_device))[0].to(device)  # [num seg, num max tokens, emb size]
         input_mask = input_mask.to(torch.bool)
         mention_doc = mention_doc[input_mask]
         speaker_ids = speaker_ids[input_mask]
@@ -320,17 +347,17 @@ class CorefModel(nn.Module):
                 #     else:
                 #         mentions_counts[mention] += 1
                 # self.singletons = torch.tensor([k for k,v in mentions_counts.items() if v == 1]).to(self.device)
-            candidate_labels = torch.matmul(torch.unsqueeze(gold_mention_cluster_map, 0).to(torch.float), same_span.to(torch.float))
+            candidate_labels = torch.matmul(torch.unsqueeze(gold_mention_cluster_map, 0).to(dtype), same_span.to(dtype))
             candidate_labels = torch.squeeze(candidate_labels.to(torch.long), 0)  # [num candidates]; non-gold span has label 0
             if conf["span2head"]:
-                candidate_span_heads = torch.matmul(torch.unsqueeze(heads + 1, 0).to(torch.float), same_span.to(torch.float))
+                candidate_span_heads = torch.matmul(torch.unsqueeze(heads + 1, 0).to(dtype), same_span.to(dtype))
                 candidate_span_heads = torch.squeeze(candidate_span_heads.to(torch.long), 0)
 
         if conf['use_trees']:
             deprel_ids = deprel_ids[input_mask]
 
             deprels_emb = self.emb_deprels(deprel_ids.to(torch.long))
-            deprels_emb_ext = torch.cat((deprels_emb, torch.zeros([1, deprels_emb.size(1)]).to(device)))
+            deprels_emb_ext = torch.cat((deprels_emb, torch.zeros([1, deprels_emb.size(1)], dtype=dtype).to(device)))
 
             parents = torch.transpose(parents, 1, 2)[input_mask]
             parents[(parents < 0) | (parents > num_words)] = num_words
@@ -373,8 +400,8 @@ class CorefModel(nn.Module):
             if conf['model_heads']:
                 token_attn = torch.squeeze(self.mention_token_attn(mention_doc), 1)
             else:
-                token_attn = torch.ones(num_words, dtype=torch.float, device=device)  # Use avg if no attention
-            candidate_tokens_attn_raw = torch.log(candidate_tokens_mask.to(torch.float)) + torch.unsqueeze(token_attn, 0)
+                token_attn = torch.ones(num_words, dtype=dtype, device=device)  # Use avg if no attention
+            candidate_tokens_attn_raw = torch.log(candidate_tokens_mask.to(dtype)) + torch.unsqueeze(token_attn, 0)
             candidate_tokens_attn = nn.functional.softmax(candidate_tokens_attn_raw, dim=1)
             head_attn_emb = torch.matmul(candidate_tokens_attn, mention_doc)
             candidate_emb_list.append(head_attn_emb)
@@ -399,7 +426,7 @@ class CorefModel(nn.Module):
             if not is_training or conf["push_pop_decode_during_training"]:
                 if conf["use_crf"] and (not is_training or conf["crf_decode_during_training"]):
                     # instructions_indices = torch.squeeze(torch.tensor(self.crf.decode(torch.unsqueeze(instructions_logits, dim=0)))).to(self.device)
-                    instructions_indices = torch.squeeze(torch.tensor(self.crf.viterbi_decode(torch.unsqueeze(instructions_logits.cpu(), dim=0), mask=torch.ones([1, instructions_logits.shape[1]], dtype=bool))))
+                    instructions_indices = torch.squeeze(torch.tensor(self.crf.viterbi_decode(torch.unsqueeze(instructions_logits, dim=0), mask=torch.ones([1, instructions_logits.shape[1]], dtype=bool))))
                 else:
                     instructions_indices = torch.argmax(instructions_logits, dim=-1)
                 pp_span_starts, pp_span_ends = self.extract_spans_from_push_pop(instructions_indices.cpu())
@@ -417,7 +444,7 @@ class CorefModel(nn.Module):
                 head_absolute_position = torch.unsqueeze(top_span_starts, 1).repeat(1, self.max_span_width) + torch.unsqueeze(torch.arange(self.max_span_width), 0).to(self.device)
                 valid_head_mask = head_absolute_position <= torch.unsqueeze(top_span_ends, -1)
                 span2head_embedding = torch.unsqueeze(top_span_emb, 1).repeat(1, self.max_span_width, 1)
-                head_embedding = torch.zeros(num_top_spans, self.max_span_width, self.bert_emb_size).to(self.device)
+                head_embedding = torch.zeros(num_top_spans, self.max_span_width, self.bert_emb_size, dtype=self.dtype).to(self.device)
                 head_embedding[valid_head_mask] = mention_doc[head_absolute_position[valid_head_mask]]
                 span2head_embedding = torch.cat([span2head_embedding, head_embedding], -1)
             else:
@@ -431,9 +458,9 @@ class CorefModel(nn.Module):
         top_span_mention_scores = candidate_mention_scores[selected_idx]
         if conf["model_singletons"]:
             top_span_emb = torch.cat([top_span_emb, torch.unsqueeze(self.singleton_embedding(torch.tensor(0, device=device)), 0)], 0)
-            top_span_mention_scores = torch.cat([top_span_mention_scores, torch.tensor([0], device=device)], 0)
+            top_span_mention_scores = torch.cat([top_span_mention_scores, torch.tensor([0], device=device, dtype=dtype)], 0)
             if top_span_cluster_ids is not None:
-                top_span_cluster_ids = torch.cat([top_span_cluster_ids, torch.tensor([-100], device=device)], 0)
+                top_span_cluster_ids = torch.cat([top_span_cluster_ids, torch.tensor([-100], device=device, dtype=dtype)], 0)
         # Coarse pruning on each mention's antecedents
         max_top_antecedents = min(num_top_spans, conf['max_top_antecedents'])
         if conf["model_singletons"]:
@@ -449,12 +476,12 @@ class CorefModel(nn.Module):
         target_span_emb = self.dropout(torch.transpose(top_span_emb, 0, 1))
         pairwise_coref_scores = torch.matmul(source_span_emb, target_span_emb)
         if conf["model_singletons"] and conf["mask_singleton_binary_score"]:
-            singleton_mask = torch.ones_like(pairwise_coref_scores)
+            singleton_mask = torch.ones_like(pairwise_coref_scores, dtype=dtype)
             singleton_mask[-1, :] = 0
             singleton_mask[:, -1] = 0
             pairwise_coref_scores = pairwise_coref_scores * singleton_mask
         pairwise_fast_scores = pairwise_mention_score_sum + pairwise_coref_scores
-        pairwise_fast_scores += torch.log(antecedent_mask.to(torch.float))
+        pairwise_fast_scores += torch.log(antecedent_mask.to(dtype))
         if conf['use_distance_prior']:
             distance_score = torch.squeeze(self.antecedent_distance_score_ffnn(self.dropout(self.emb_antecedent_distance_prior.weight)), 1)
             bucketed_distance = util.bucket_distance(antecedent_offsets)
@@ -466,12 +493,15 @@ class CorefModel(nn.Module):
             pairwise_fast_scores = pairwise_fast_scores[:-1,:]
             antecedent_offsets = antecedent_offsets[:-1,:]
             if conf["separate_singletons"]:
-                pairwise_fast_scores[:, -1] += torch.squeeze(self.singletons_span_emb_score_ffnn(candidate_span_emb[selected_idx, :]), 1)
+                # pairwise_fast_scores[:, -1] += torch.squeeze(self.singletons_span_emb_score_ffnn(candidate_span_emb[selected_idx, :]), 1)
+                pairwise_fast_scores += torch.cat([torch.zeros([pairwise_fast_scores.shape[0], pairwise_fast_scores.shape[1] - 1], device=device), self.singletons_span_emb_score_ffnn(candidate_span_emb[selected_idx, :])], dim=1)
 
 
         top_pairwise_fast_scores, top_antecedent_idx = torch.topk(pairwise_fast_scores, k=max_top_antecedents)
         top_antecedent_mask = util.batch_select(antecedent_mask, top_antecedent_idx, device)  # [num top spans, max top antecedents]
         top_antecedent_offsets = util.batch_select(antecedent_offsets, top_antecedent_idx, device)
+        if conf["model_singletons"]:
+            singleton_antecedent_mask = (top_antecedent_idx == top_pairwise_fast_scores.shape[0]).to(dtype=bool)
 
         # Slow mention ranking
         if conf['fine_grained']:
@@ -524,10 +554,13 @@ class CorefModel(nn.Module):
                 similarity_emb = target_emb * top_antecedent_emb
                 pair_emb = torch.cat([target_emb, top_antecedent_emb, similarity_emb, feature_emb], 2)
                 top_pairwise_slow_scores = torch.squeeze(self.coref_score_ffnn(pair_emb), 2)
-                if conf['separate_singletons']:
-                    top_pairwise_slow_scores[top_antecedent_idx == top_pairwise_slow_scores.shape[0]] += torch.squeeze(self.singletons_coref_score_ffnn(pair_emb), 2)[top_antecedent_idx == top_pairwise_slow_scores.shape[0]]
+                if conf["model_singletons"] and conf['separate_singletons']:
+                    singletons_score = torch.squeeze(self.singletons_coref_score_ffnn(pair_emb), 2)
+                    singletons_score *= ~singleton_antecedent_mask
+                    # top_pairwise_slow_scores[top_antecedent_idx == top_pairwise_slow_scores.shape[0]] += torch.squeeze(self.singletons_coref_score_ffnn(pair_emb), 2)[top_antecedent_idx == top_pairwise_slow_scores.shape[0]]
+                    top_pairwise_slow_scores += singletons_score
                 if conf["model_singletons"] and conf["mask_singleton_binary_score"]:
-                    top_pairwise_slow_scores[top_antecedent_idx == top_pairwise_slow_scores.shape[0]] = 0
+                    top_pairwise_slow_scores *= ~singleton_antecedent_mask
                 top_pairwise_scores = top_pairwise_slow_scores + top_pairwise_fast_scores
                 if conf['higher_order'] == 'cluster_merging':
                     cluster_merging_scores = ho.cluster_merging(top_span_emb, top_antecedent_idx, top_pairwise_scores, self.emb_cluster_size, self.cluster_score_ffnn, None, self.dropout,
@@ -593,34 +626,37 @@ class CorefModel(nn.Module):
             if conf["model_mentions"]:
                 mention_scores = top_pairwise_scores[top_antecedent_idx == top_pairwise_scores.shape[0]]
                 mention_scores = torch.stack((mention_scores, -mention_scores), dim=1)
-                mention_gold_scores = pairwise_labels.to(torch.float)[top_antecedent_idx == top_pairwise_scores.shape[0]]
+                mention_gold_scores = pairwise_labels.to(dtype)[top_antecedent_idx == top_pairwise_scores.shape[0]]
                 mention_gold_scores = torch.stack((torch.log(mention_gold_scores), torch.log(1 - mention_gold_scores)), dim=1)
-                top_pairwise_scores[top_antecedent_idx == top_pairwise_scores.shape[0]] = -math.inf
-                pairwise_labels[top_antecedent_idx == top_pairwise_scores.shape[0]] = False
+                # top_pairwise_scores[top_antecedent_idx == top_pairwise_scores.shape[0]] = -math.inf
+                # top_pairwise_scores *= -1 / (-1 * ~singleton_antecedent_mask) # put -inf on mask indices without indexing :D
+                top_pairwise_scores += singleton_antecedent_mask * -1000000
+                # pairwise_labels[top_antecedent_idx == top_pairwise_scores.shape[0]] = False
+                pairwise_labels &= ~singleton_antecedent_mask
                 dummy_antecedent_labels = torch.logical_not(pairwise_labels.any(dim=1, keepdims=True))
                 top_antecedent_gold_labels = torch.cat([dummy_antecedent_labels, pairwise_labels], dim=1)
                 top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1) # pridava score pro dummy
-                log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
+                log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(dtype)), dim=1)
                 log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
                 loss = torch.sum(log_norm - log_marginalized_antecedent_scores)
                 loss += torch.sum(torch.logsumexp(mention_scores, dim=1) - torch.logsumexp(mention_scores + mention_gold_scores, dim=1))
             else:
-                log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
+                log_marginalized_antecedent_scores = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(dtype)), dim=1)
                 log_norm = torch.logsumexp(top_antecedent_scores, dim=1)
                 loss = torch.sum(log_norm - log_marginalized_antecedent_scores)
         elif conf['loss_type'] == 'hinge':
             top_antecedent_mask = torch.cat([torch.ones(num_top_spans, 1, dtype=torch.bool, device=device), top_antecedent_mask], dim=1)
-            top_antecedent_scores += torch.log(top_antecedent_mask.to(torch.float))
+            top_antecedent_scores += torch.log(top_antecedent_mask.to(dtype))
             highest_antecedent_scores, highest_antecedent_idx = torch.max(top_antecedent_scores, dim=1)
-            gold_antecedent_scores = top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float))
+            gold_antecedent_scores = top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(dtype))
             highest_gold_antecedent_scores, highest_gold_antecedent_idx = torch.max(gold_antecedent_scores, dim=1)
             slack_hinge = 1 + highest_antecedent_scores - highest_gold_antecedent_scores
             # Calculate delta
             highest_antecedent_is_gold = (highest_antecedent_idx == highest_gold_antecedent_idx)
             mistake_false_new = (highest_antecedent_idx == 0) & torch.logical_not(dummy_antecedent_labels.squeeze())
-            delta = ((3 - conf['false_new_delta']) / 2) * torch.ones(num_top_spans, dtype=torch.float, device=device)
-            delta -= (1 - conf['false_new_delta']) * mistake_false_new.to(torch.float)
-            delta *= torch.logical_not(highest_antecedent_is_gold).to(torch.float)
+            delta = ((3 - conf['false_new_delta']) / 2) * torch.ones(num_top_spans, dtype=dtype, device=device)
+            delta -= (1 - conf['false_new_delta']) * mistake_false_new.to(dtype)
+            delta *= torch.logical_not(highest_antecedent_is_gold).to(dtype)
             loss = torch.sum(slack_hinge * delta)
 
         # Add mention loss
@@ -634,7 +670,7 @@ class CorefModel(nn.Module):
         if conf['higher_order'] == 'cluster_merging':
             top_pairwise_scores += cluster_merging_scores
             top_antecedent_scores = torch.cat([torch.zeros(num_top_spans, 1, device=device), top_pairwise_scores], dim=1)
-            log_marginalized_antecedent_scores2 = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(torch.float)), dim=1)
+            log_marginalized_antecedent_scores2 = torch.logsumexp(top_antecedent_scores + torch.log(top_antecedent_gold_labels.to(dtype)), dim=1)
             log_norm2 = torch.logsumexp(top_antecedent_scores, dim=1)  # [num top spans]
             loss_cm = torch.sum(log_norm2 - log_marginalized_antecedent_scores2)
             if conf['cluster_dloss']:
@@ -647,9 +683,11 @@ class CorefModel(nn.Module):
         if conf["span2head"]:
             top_span_head_offsets = top_span_heads - top_span_starts - 1
             top_span_head_offsets[top_span_head_offsets < 0] = -100
-            loss_fn = nn.BCELoss()
+            # loss_fn = nn.BCELoss()
+            loss_fn = nn.BCEWithLogitsLoss()
             if torch.any(top_span_head_offsets >= 0):
-                span2head_loss = 1000 * loss_fn(torch.sigmoid(span2head_logits[top_span_head_offsets >= 0, :]), one_hot(top_span_head_offsets[top_span_head_offsets >= 0], span2head_logits.size(dim=1), self.device))
+                # span2head_loss = 1000 * loss_fn(torch.sigmoid(span2head_logits[top_span_head_offsets >= 0, :]), one_hot(top_span_head_offsets[top_span_head_offsets >= 0], span2head_logits.size(dim=1), self.device))
+                span2head_loss = conf["additional_loss_coef"] * loss_fn(span2head_logits[top_span_head_offsets >= 0, :], one_hot(top_span_head_offsets[top_span_head_offsets >= 0], span2head_logits.size(dim=1), self.device))
                 loss += span2head_loss
                 gold_heads = (top_span_heads > 0).sum()
                 gold_heads2 = (top_span_head_offsets >= 0).sum()
@@ -660,7 +698,7 @@ class CorefModel(nn.Module):
             else:
                 pp_loss_fn = torch.nn.CrossEntropyLoss()
                 pp_loss = pp_loss_fn(torch.transpose(instructions_logits, -1, 1), instructions)
-            loss += 1000 * pp_loss
+            loss += conf["additional_loss_coef"] * pp_loss
         # Debug
         if self.debug:
             if self.update_steps % 20 == 0:

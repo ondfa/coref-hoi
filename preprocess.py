@@ -29,17 +29,24 @@ def normalize_word(word, language):
         return word
 
 
-def get_sentence_map(segments, sentence_end):
-    assert len(sentence_end) == sum([len(seg) - 2 for seg in segments])  # of subtokens in all segments
+def get_sentence_map(segments, sentence_end, use_sep, use_cls):
+    num_special_tokens = 0
+    if use_sep:
+        num_special_tokens += 1
+    if use_cls:
+        num_special_tokens += 1
+    assert len(sentence_end) == sum([len(seg) - num_special_tokens for seg in segments])  # of subtokens in all segments
     sent_map = []
     sent_idx, subtok_idx = 0, 0
     for segment in segments:
-        sent_map.append(sent_idx)  # [CLS]
-        for i in range(len(segment) - 2):
+        if use_cls:
+            sent_map.append(sent_idx)  # [CLS]
+        for i in range(len(segment) - num_special_tokens):
             sent_map.append(sent_idx)
             sent_idx += int(sentence_end[subtok_idx])
             subtok_idx += 1
-        sent_map.append(sent_idx)  # [SEP]
+        if use_sep:
+            sent_map.append(sent_idx)  # [SEP]
     return sent_map
 
 
@@ -71,7 +78,7 @@ class DocumentState(object):
         self.clusters = collections.defaultdict(list)  # {cluster_id: [(first_subtok_idx, last_subtok_idx) for each mention]}
         self.coref_stacks = collections.defaultdict(list)
 
-    def finalize(self):
+    def finalize(self, use_sep, use_cls):
         """ Extract clusters; fill other info e.g. speakers, pronouns """
         # Populate speakers from info
         subtoken_idx = 0
@@ -130,7 +137,7 @@ class DocumentState(object):
 
         merged_clusters = [list(cluster) for cluster in merged_clusters]
         all_mentions = util.flatten(merged_clusters)
-        sentence_map = get_sentence_map(self.segments, self.sentence_end)
+        sentence_map = get_sentence_map(self.segments, self.sentence_end, use_sep, use_cls)
         subtoken_map = util.flatten(self.segment_subtoken_map)
 
         # Sanity check
@@ -154,7 +161,7 @@ class DocumentState(object):
             'pronouns': self.pronouns
         }
 
-    def finalize_from_udapi(self, udapi_doc):
+    def finalize_from_udapi(self, udapi_doc, use_sep, use_cls):
         """ Extract clusters; fill other info e.g. speakers, pronouns """
         # Populate speakers from info
         heads = {}
@@ -248,7 +255,7 @@ class DocumentState(object):
 
         merged_clusters = [list(cluster) for cluster in merged_clusters]
         all_mentions = util.flatten(merged_clusters)
-        sentence_map = get_sentence_map(self.segments, self.sentence_end)
+        sentence_map = get_sentence_map(self.segments, self.sentence_end, use_sep, use_cls)
         subtoken_map = util.flatten(self.segment_subtoken_map)
 
 
@@ -356,13 +363,27 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
             if end_idx < curr_idx:
                 logger.error('Cannot split valid segment: no sentence end or token end')
 
-        segment = [tokenizer.cls_token] + document_state.subtokens[curr_idx: end_idx + 1] + [tokenizer.sep_token]
+        segment = document_state.subtokens[curr_idx: end_idx + 1]
+        if tokenizer.cls_token is not None:
+            segment.insert(0, tokenizer.cls_token)
+        if tokenizer.sep_token is not None:
+            segment.append(tokenizer.sep_token)
         document_state.segments.append(segment)
 
         subtoken_map = document_state.subtoken_map[curr_idx: end_idx + 1]
-        document_state.segment_subtoken_map.append([prev_token_idx] + subtoken_map + [subtoken_map[-1]])
+        tmp_map = subtoken_map.copy()
+        if tokenizer.cls_token is not None:
+            tmp_map.insert(0, prev_token_idx)
+        if tokenizer.sep_token is not None:
+            tmp_map.append(subtoken_map[-1])
+        document_state.segment_subtoken_map.append(tmp_map)
 
-        document_state.segment_info.append([None] + document_state.info[curr_idx: end_idx + 1] + [None])
+        tmp_info = document_state.info[curr_idx: end_idx + 1]
+        if tokenizer.cls_token is not None:
+            tmp_info.insert(0, None)
+        if tokenizer.sep_token is not None:
+            tmp_info.append(None)
+        document_state.segment_info.append(tmp_info)
 
         curr_idx = end_idx + 1
         prev_token_idx = subtoken_map[-1]
@@ -403,15 +424,16 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, sol
     constraits1 = document_state.sentence_end if language != 'arabic' else document_state.token_end
     split_into_segments(document_state, seg_len, constraits1, document_state.token_end, tokenizer)
     if udapi_document is not None:
-        document = document_state.finalize_from_udapi(udapi_document)
+        document = document_state.finalize_from_udapi(udapi_document, tokenizer.sep_token is not None, tokenizer.cls_token is not None)
     else:
-        document = document_state.finalize()
+        document = document_state.finalize(tokenizer.sep_token is not None, tokenizer.cls_token is not None)
     return document
 
 
 def minimize_partition(partition, extension, args, tokenizer):
     seg_len = args.max_segment_len if f"max_{partition}_segment_len" not in args else args[f"max_{partition}_segment_len"]
     input_path = os.path.join(args.data_dir, '..' + ("/sysempty" if args.system_empty_nodes else ""), f'{args.language}-{partition}.{extension}')
+    # input_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{extension}')
     print(input_path)
     output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{seg_len}{".empty" if args.solve_empty_nodes else ".sysempty" if args.system_empty_nodes else ""}.jsonlines')
     doc_count = 0
@@ -436,7 +458,7 @@ def minimize_partition(partition, extension, args, tokenizer):
 
 
 def minimize_language(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.bert_tokenizer_name, use_fast=False)
 
     # minimize_partition('dev', 'v4_gold_conll', args, tokenizer)
     # minimize_partition('test', 'v4_gold_conll', args, tokenizer)
@@ -450,7 +472,7 @@ def minimize_language(args):
 if __name__ == '__main__':
     config_name = sys.argv[1]
     config = util.initialize_config(config_name)
-
+    config["max_segment_len"] = 2048
     os.makedirs(config.data_dir, exist_ok=True)
 
     minimize_language(config)
