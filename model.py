@@ -94,10 +94,11 @@ def get_heads(depths, starts, ends, max_span_len):
 
 
 class CorefModel(nn.Module):
-    def __init__(self, config, device, bert_device=None, dtype=torch.float, num_genres=None, instructions=None, subtoken_map=None, deprels=None):
+    def __init__(self, config, device, bert_device=None, dtype=torch.float32, num_genres=None, instructions=None, subtoken_map=None, deprels=None):
         super().__init__()
         self.config = config
         self.device = device
+        print(self.device)
         if bert_device is None:
             bert_device = device
         self.bert_device = bert_device
@@ -214,7 +215,7 @@ class CorefModel(nn.Module):
         if config["use_LORA"]:
             from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
             lora_config = LoraConfig(
-                r=8,
+                r=config["LORA_rank"],
                 lora_alpha=32,
                 # target_modules=["q", "v"],
                 lora_dropout=0.05,
@@ -299,7 +300,6 @@ class CorefModel(nn.Module):
         device = self.device
         conf = self.config
         dtype = self.dtype
-
         do_loss = False
         if gold_mention_cluster_map is not None:
             assert gold_starts is not None

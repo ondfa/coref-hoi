@@ -125,7 +125,7 @@ class Runner:
         os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
         while True:
             try:
-                wandb.init(project="coref-multiling", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
+                wandb.init(project="coref-multiling-2024", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
                 break
             except (requests.exceptions.ConnectionError, ConnectionRefusedError, wandb.errors.UsageError) as e:
                 logger.error(e)
@@ -164,7 +164,7 @@ class Runner:
                 deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])
                 deprels = [rel[0] for rel in deprels]
             bert_device = conf["bert_device"] if "bert_device" in conf else None
-            float_dtype = torch.bfloat16 if conf["use_half_precision"] else float
+            float_dtype = torch.bfloat16 if conf["use_half_precision"] else torch.float32
             model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels, bert_device=bert_device, dtype=float_dtype)
         logger.info('Model parameters:')
         for name, param in model.named_parameters():
@@ -212,12 +212,18 @@ class Runner:
                 model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
                 example_gpu = [d.to(self.device) for d in example]
                 torch.cuda.empty_cache
-                _, loss = model(*example_gpu)
+                out, loss = model(*example_gpu)
 
                 # Backward; accumulate gradients and clip by grad norm
                 if grad_accum > 1:
                     loss /= grad_accum
-                loss.backward()
+                try:
+                    loss.backward()
+                except RuntimeError as err:
+                    print(f"Error in backward pass for document {doc_key}. Loss: {loss.item()}")
+                    print(f"Output: {out}")
+                    print(err)
+                    exit(1)
                 if conf['max_grad_norm']:
                     torch.nn.utils.clip_grad_norm_(bert_param, conf['max_grad_norm'])
                     torch.nn.utils.clip_grad_norm_(task_param, conf['max_grad_norm'])
@@ -252,7 +258,7 @@ class Runner:
                     if (len(loss_history) > 1 or conf['evaluate_first']) and len(loss_history) % conf['eval_frequency'] == 1:
                         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_eval_path'])
                         torch.cuda.empty_cache()
-                        if f1 > max_f1:
+                        if f1 >= max_f1:
                             max_f1 = f1
                             new_path = self.save_model_checkpoint(model, len(loss_history))
                             if best_model_path is not None:
@@ -322,9 +328,10 @@ class Runner:
             udapi_io.write_data(gold_data, gold_fd)
             gold_fd.flush()
             conll_path = gold_fd.name
-        if model.device != self.device:
-            model.to(self.device)
-            model.bert.to(model.bert_device)
+        # if model.device != self.device:
+        model.to(self.device)
+        model.bert.to(model.bert_device)
+        print(model.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
         doc_span_to_head = {}
@@ -416,7 +423,11 @@ class Runner:
                 fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
             udapi_io.write_data(udapi_docs, fd)
             fd.flush()
-            score, score_with_singletons = evaluate_coreud(conll_path, fd.name)
+            gold_path = os.path.join(os.path.split(conll_path)[0], "gold", os.path.split(conll_path)[-1])
+            if not os.path.exists(gold_path):
+                gold_path = conll_path
+            logger.info(gold_path)
+            score, score_with_singletons = evaluate_coreud(gold_path, fd.name)
             metrics[phase + "_corefud_score"] = score
             metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
             metrics[phase + "_" + dataset + "_corefud_score"] = score
@@ -435,6 +446,8 @@ class Runner:
 
         if self.config["eval_cross_segment"]:
             gold_fd.close()
+        if official:
+            return metrics[phase + "_corefud_score"], metrics
         return f * 100, metrics
 
     def predict(self, model, tensor_examples):
@@ -560,8 +573,9 @@ class Runner:
         else:
             import glob
             models = glob.glob(join(dir, 'model_*'))
-            models.sort(key=cmp_to_key(compare_models))
-            model.load_state_dict(torch.load(models[-1], map_location=torch.device('cpu')), strict=False)
+            models.sort(key=cmp_to_key(compare_models), reverse=True)
+            index = 1 if "model_index" not in config else config["model_index"]
+            model.load_state_dict(torch.load(models[index - 1], map_location=torch.device('cpu')), strict=False)
 
 def compare_models(m1, m2):
     split1 = m1.split("/")[-1].split("_")
