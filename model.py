@@ -21,6 +21,21 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s
                     level=logging.INFO)
 logger = logging.getLogger()
 
+def compare_models(m1, m2):
+    split1 = m1.split("/")[-1].split("_")
+    split2 = m2.split("/")[-1].split("_")
+    try:
+        d1 = datetime.strptime(split1[1] + "_" + split1[2], '%y%b%d_%H-%M-%S')
+    except ValueError:
+        d1 = datetime.strptime("23" + split1[1] + "_" + split1[2], '%y%b%d_%H-%M-%S')
+    try:
+    	d2 = datetime.strptime(split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
+    except ValueError:
+        d2 = datetime.strptime("23" + split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
+    if d1 == d2:
+        return 1 if split1[3] > split2[3] else -1
+    else:
+        return 1 if d1 > d2 else -1
 
 
 def create_positional_embeddings_random(smaller_embeddings, larger_embeddings):
@@ -212,14 +227,18 @@ class CorefModel(nn.Module):
             old_state_dict = bert.state_dict()
             new_state_dict = average_models(old_state_dict, new_state_dict)
             bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=new_state_dict)
-        if config["use_LORA"]:
+        if config["use_LORA"] and not config["new_LORA"]:
+            
             from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
             lora_config = LoraConfig(
-                r=config["LORA_rank"],
+                r=int(self.config["LORA_rank"] * self.config["LORA_rank_factor"]),
                 lora_alpha=32,
                 # target_modules=["q", "v"],
                 lora_dropout=0.05,
                 bias="none",
+                # target_modules=["q"],
+                # use_dora=True,
+                # init_lora_weights="pissa_niter_16",
                 # task_type=TaskType.SEQ_2_SEQ_LM
             )
             if config["use_int8"]:
@@ -228,6 +247,7 @@ class CorefModel(nn.Module):
             # add LoRA adaptor
             bert = get_peft_model(bert, lora_config)
             bert.print_trainable_parameters()
+            # bert.disable_adapter_layers()
         return bert
 
     def make_embedding(self, dict_size, std=0.02, emb_size=None):

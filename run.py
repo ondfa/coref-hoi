@@ -10,6 +10,7 @@ import logging
 import random
 import subprocess
 import tempfile
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -117,6 +118,8 @@ class Runner:
 
         # Set up device
         self.device = torch.device('cpu' if gpu_id < 0 else f'cuda:{gpu_id}')
+        self.bert_device = self.config["bert_device"] if "bert_device" in self.config else None
+        self.float_dtype = torch.bfloat16 if self.config["use_half_precision"] else torch.float32
 
         # Set up data
         self.data = CorefDataProcessor(self.config, language=self.config.language)
@@ -133,10 +136,37 @@ class Runner:
 
     def initialize_model(self, saved_suffix=None, **kwargs):
         model = CorefModel(self.config, self.device, **kwargs)
+        # tmp_bert = model.bert
+        # model.bert = None
         if saved_suffix:
             self.load_model_checkpoint(model, saved_suffix)
         if "load_model_from_exp" in self.config:
-            self.load_model_from_experiment(model, self.config["load_model_from_exp"])
+            exp_name = self.config["load_model_from_exp"]
+            if self.config["use_old_pretrained_models"]:
+                exp_name += "_23"
+            self.load_model_from_experiment(model, exp_name)
+        # model.bert = tmp_bert
+        if self.config["use_LORA"] and self.config["new_LORA"]:
+            
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
+            lora_config = LoraConfig(
+                r=int(self.config["LORA_rank"] * self.config["LORA_rank_factor"]),
+                lora_alpha=32,
+                # target_modules=["q", "v"],
+                lora_dropout=0.05,
+                bias="none",
+                # target_modules=["q"],
+                # use_dora=True,
+                # init_lora_weights="pissa_niter_16",
+                # task_type=TaskType.SEQ_2_SEQ_LM
+            )
+            if self.config["use_int8"]:
+                # prepare int-8 model for training
+                bert = prepare_model_for_kbit_training(model.bert)
+            # add LoRA adaptor
+            bert = get_peft_model(model.bert, lora_config)
+            bert.print_trainable_parameters()
+            model.bert = bert
         return model
 
     def train(self, model):
@@ -163,9 +193,7 @@ class Runner:
             if conf["use_trees"]:
                 deprels = sorted(runner.data.stored_info["deprels_dict"].items(), key=lambda entry: entry[1])
                 deprels = [rel[0] for rel in deprels]
-            bert_device = conf["bert_device"] if "bert_device" in conf else None
-            float_dtype = torch.bfloat16 if conf["use_half_precision"] else torch.float32
-            model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels, bert_device=bert_device, dtype=float_dtype)
+            model = self.initialize_model(instructions=instructions, subtoken_map=stored_info["subtoken_maps"], deprels=deprels, bert_device=self.bert_device, dtype=self.float_dtype)
         logger.info('Model parameters:')
         for name, param in model.named_parameters():
             logger.info('%s: %s' % (name, tuple(param.shape)))
@@ -328,10 +356,10 @@ class Runner:
             udapi_io.write_data(gold_data, gold_fd)
             gold_fd.flush()
             conll_path = gold_fd.name
-        # if model.device != self.device:
-        model.to(self.device)
-        model.bert.to(model.bert_device)
-        print(model.device)
+        if model.device != self.device:
+            model.to(self.device)
+            model.bert.to(model.bert_device)
+        # print(model.device)
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
         doc_span_to_head = {}
@@ -450,27 +478,100 @@ class Runner:
             return metrics[phase + "_corefud_score"], metrics
         return f * 100, metrics
 
-    def predict(self, model, tensor_examples):
+    def predict(self, model, tensor_examples, stored_info):
         logger.info('Predicting %d samples...' % len(tensor_examples))
-        model.to(self.device)
+        evaluator = CorefEvaluator()
+        doc_to_prediction = {}
+        doc_span_to_head = {}
+        if model.device != self.device:
+            model.to(self.device)
+            model.bert.to(model.bert_device)
         predicted_spans, predicted_antecedents, predicted_clusters = [], [], []
+        max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
+        for i, (doc_key, tensor_example) in enumerate(tqdm(tensor_examples)):
+            model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
+            gold_clusters = stored_info['gold'][doc_key]
+            tensor_example = tensor_example[:-4]  # Strip out gold
+            num_sentences = tensor_example[0].shape[0]
+            if num_sentences <= max_sentences:
+                batch_examples = [tensor_example]
+            else:
+                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=1 if self.config["max_segment_overlap"] else None)
+                if self.config["max_segment_overlap"]:
+                    batch_examples = batch_examples[:-max_sentences]
+            predicted_clusters = []
+            mention_to_cluster_id = {}
+            span_to_head = {}
 
-        for i, tensor_example in enumerate(tensor_examples):
-            tensor_example = tensor_example[:9]
-            example_gpu = [d.to(self.device) for d in tensor_example]
-            with torch.no_grad():
-                _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores = model(*example_gpu)
-            span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
-            antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
-            clusters, mention_to_cluster_id, antecedents = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
+            for j, example in enumerate(batch_examples):
+                example_gpu = [d.to(self.device) for d in example]
+                with torch.no_grad():
+                    _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
+                    offset = j if self.config["max_segment_overlap"] else j * max_sentences
+                    sentence_len = tensor_example[3]
+                    word_offset = sentence_len[:offset].sum()
+                    span_starts = span_starts + word_offset
+                    span_ends = span_ends + word_offset
+                example_gpu = [e.detach().cpu() for e in example_gpu]
+                if span2head_logits is not None:
+                    heads = model.predict_heads(span_starts, span_ends, span2head_logits)
+                    model.get_mention2head_map(span_starts.tolist(), span_ends.tolist(), heads, span_to_head)
+                span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
+                antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
+                tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
+                if self.config["max_segment_overlap"] and self.config["filter_overlapping_mentions"] and j > 0:
+                    tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:offset + max_sentences].sum() - 1)
+                if self.config["max_segment_overlap"]:
+                    predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id)
+                else:
+                    predicted_clusters.extend(tmp_predicted_clusters)
+                    mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
+                    predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
 
-            spans = [(span_start, span_end) for span_start, span_end in zip(span_starts, span_ends)]
-            predicted_spans.append(spans)
-            predicted_antecedents.append(antecedents)
-            predicted_clusters.append(clusters)
+            if self.config["filter_singletons"]:
+                predicted_clusters = util.discard_singletons(predicted_clusters)
+            doc_to_prediction[doc_key] = predicted_clusters
+            if span2head_logits is not None:
+                doc_span_to_head[doc_key] = span_to_head
+        return doc_to_prediction, doc_span_to_head
+        
+    def eval_multi(self, model, tensor_examples, stored_info, step, official=True, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
+        metrics = {}
+        doc_to_prediction, doc_span_to_head = self.predict(model, tensor_examples, stored_info)
+        for path in conll_path:
+            dataset = path.split("/")[-1].split("-")[0]
+            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head)
+            if self.config["filter_long_mentions"]:
+                udapi_docs = udapi_io.filter_long_mentions(udapi_docs, self.config["max_mention_length"])
+            if save_predictions:
+                save_path = join(self.config['log_dir'], self.name_suffix + "_pred_" + phase + "_" + path.split("/")[-1])
+                fd = open(save_path, "wt", encoding="utf-8")
+            else:
+                fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
+            udapi_io.write_data(udapi_docs, fd)
+            fd.flush()
+            gold_path = os.path.join(os.path.split(path)[0], "gold", os.path.split(path)[-1])
+            if not os.path.exists(gold_path):
+                gold_path = path
+            logger.info(gold_path)
+            score, score_with_singletons = evaluate_coreud(gold_path, fd.name)
+            metrics[phase + "_corefud_score"] = score
+            metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
+            metrics[phase + "_" + dataset + "_corefud_score"] = score
+            metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
+            if save_predictions and self.config["final_path"]:
+                if not os.path.exists(self.config["final_path"]):
+                    os.makedirs(self.config["final_path"])
+                shutil.copyfile(fd.name, os.path.join(self.config["final_path"], path.split("/")[-1]))
+            fd.close()
+        for name, score in metrics.items():
+            logger.info('%s: %.2f' % (name, score))
+            wandb.run.summary[name] = score
+        wandb.log(metrics)
 
-        return predicted_clusters, predicted_spans, predicted_antecedents
-
+        return metrics[phase + "_corefud_score"], metrics
+    
+    
     def get_optimizer(self, model):
         no_decay = ['bias', 'LayerNorm.weight']
         bert_param, task_param = model.get_params(named=True)
@@ -574,7 +675,7 @@ class Runner:
             import glob
             models = glob.glob(join(dir, 'model_*'))
             models.sort(key=cmp_to_key(compare_models), reverse=True)
-            index = 1 if "model_index" not in config else config["model_index"]
+            index = 1 if "model_index" not in self.config else self.config["model_index"]
             model.load_state_dict(torch.load(models[index - 1], map_location=torch.device('cpu')), strict=False)
 
 def compare_models(m1, m2):
@@ -596,6 +697,8 @@ def compare_models(m1, m2):
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
     runner = Runner(config_name, gpu_id)
+    udapi_io.convert_all_to_text(runner.config)
+    exit(0)
     # model = runner.initialize_model()
     if runner.config["use_half_precision"]:
         from torch.cuda.amp import autocast

@@ -27,6 +27,7 @@ class CorefDataProcessor:
 
         # Get tensorized samples
         cache_path = self.get_cache_path()
+        print(cache_path)
         if os.path.exists(cache_path) and config['use_cache']:
             # Load cached tensors if exists
             with open(cache_path, 'rb') as f:
@@ -186,13 +187,13 @@ class Tensorizer:
         input_ids, input_mask, speaker_ids = [], [], []
         parents_tensor, deprels_tensor, instructions_tensor = [], [], []
         for idx, (sent_tokens, sent_speakers, sent_parents, sent_deprels, sent_instructions) in enumerate(zip(sentences, speakers, parents, deprels, instructions)):
-            self.update_deprel_dict(set(sent_deprels))
+            # self.update_deprel_dict(set(sent_deprels))
             sent_instructions = self.preprocess_instructions(sent_instructions)
             self.update_ins_dict(set(sent_instructions))
             sent_input_ids = self.tokenizer.convert_tokens_to_ids(sent_tokens)
             sent_input_mask = [1] * len(sent_input_ids)
             sent_speaker_ids = [speaker_dict[speaker] for speaker in sent_speakers]
-            sent_deprel_ids = [self.stored_info["deprels_dict"][deprel] for deprel in sent_deprels]
+            sent_deprel_ids = [self.stored_info["deprels_dict"][deprel] if deprel in self.stored_info["deprels_dict"] else 0 for deprel in sent_deprels]
             sent_ins_ids = [self.stored_info["instructions_dict"][instruction] for instruction in sent_instructions]
 
 
