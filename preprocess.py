@@ -472,7 +472,7 @@ def minimize_language(args):
 if __name__ == '__main__':
     config_name = sys.argv[1]
     config = util.initialize_config(config_name)
-    config["max_segment_len"] = 2048
+    # config["max_segment_len"] = 2048
     os.makedirs(config.data_dir, exist_ok=True)
 
     minimize_language(config)

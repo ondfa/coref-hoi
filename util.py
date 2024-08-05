@@ -2,6 +2,7 @@ from os import makedirs
 from os.path import join
 import numpy as np
 import pyhocon
+import argparse
 import logging
 import torch
 import random
@@ -26,7 +27,7 @@ def initialize_config(config_name):
     makedirs(config['tb_dir'], exist_ok=True)
 
     # logger.info(pyhocon.HOCONConverter.convert(config, "hocon"))
-    if "load_model_from_exp" in config:
+    if "load_model_from_exp" in config and config["load_model_from_exp"]:
         parent_config = initialize_config(config["load_model_from_exp"])
         config["max_training_sentences"] = parent_config["max_training_sentences"]
         config["ffnn_size"] = parent_config["ffnn_size"]

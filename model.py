@@ -14,6 +14,7 @@ import numpy as np
 import torch.nn.init as init
 import higher_order as ho
 import wandb
+from datetime import datetime
 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -29,7 +30,7 @@ def compare_models(m1, m2):
     except ValueError:
         d1 = datetime.strptime("23" + split1[1] + "_" + split1[2], '%y%b%d_%H-%M-%S')
     try:
-    	d2 = datetime.strptime(split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
+        d2 = datetime.strptime(split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
     except ValueError:
         d2 = datetime.strptime("23" + split2[1] + "_" + split2[2], '%y%b%d_%H-%M-%S')
     if d1 == d2:
@@ -193,14 +194,14 @@ class CorefModel(nn.Module):
         self.debug = True
 
     def init_bert(self, config):
-        bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'])
+        bert_config = AutoConfig.from_pretrained(config['bert_pretrained_name_or_path'], trust_remote_code=True)
         bert_config.hidden_dropout_prob = config['bert_dropout_rate']
         bert_config.attention_probs_dropout_prob = config['bert_dropout_rate']
         if "mt5" in config['bert_pretrained_name_or_path'].lower():
             model_class = MT5EncoderModel
         else:
             model_class = AutoModel
-        model = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
+        model = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], trust_remote_code=True, config=bert_config)
         bert_config.return_dict = False
         if "bert_weights_name" in config:
             bert_config.max_position_embeddings = config["max_segment_len"] + 2
@@ -218,15 +219,15 @@ class CorefModel(nn.Module):
                 state_dict["embeddings.position_ids"] = torch.tensor(range(0, bert_config.max_position_embeddings)).reshape([1, bert_config.max_position_embeddings])
             bert = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=state_dict)
         else:
-            bert = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config)
+            bert = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], trust_remote_code=True, config=bert_config)
         if "combine_with" in config:
             new_config = AutoConfig.from_pretrained(config['combine_with'])
             new_config.return_dict = False
-            new_model = AutoModel.from_pretrained(config['combine_with'], from_tf=config["from_tf"], config=new_config)
+            new_model = AutoModel.from_pretrained(config['combine_with'], from_tf=config["from_tf"], trust_remote_code=True, config=new_config)
             new_state_dict = new_model.state_dict()
             old_state_dict = bert.state_dict()
             new_state_dict = average_models(old_state_dict, new_state_dict)
-            bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], config=bert_config, state_dict=new_state_dict)
+            bert = AutoModel.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], trust_remote_code=True, config=bert_config, state_dict=new_state_dict)
         if config["use_LORA"] and not config["new_LORA"]:
             
             from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
@@ -913,6 +914,7 @@ class CorefModel(nn.Module):
                     res_m2c[mention] = len(res_clusters)
                 res_clusters.append(cluster)
         return res_clusters, res_m2c
+
 
 def sigmoid(x):
     return 1 / (1 + torch.exp(-x))

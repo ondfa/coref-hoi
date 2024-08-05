@@ -15,6 +15,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 import wandb
+wandb.require("core")
 from transformers import AdamW
 from torch.optim import Adam, SGD
 
@@ -93,19 +94,7 @@ class Runner:
         self.seed = seed
 
         # Set up config
-        self.config = util.initialize_config(config_name)
-
-        self.parser = argparse.ArgumentParser()
-        self.parser.add_argument("experiment_name")
-        self.parser.add_argument("gpu_id")
-        for key, value in self.config.items():
-            if type(value) == bool:
-                self.parser.add_argument("--" + key, default=value, action="store_true")
-            else:
-                self.parser.add_argument("--" + key, default=value, type=type(value))
-        for key, value in vars(self.parser.parse_args()).items():
-            if key in self.config:
-                self.config[key] = value
+        self.config = config = util.initialize_config(config_name)
 
         # Set up logger
         log_path = join(self.config['log_dir'], 'log_' + self.name_suffix + '.txt')
@@ -115,7 +104,21 @@ class Runner:
         # Set up seed
         if seed:
             util.set_seed(seed)
-
+        parser = argparse.ArgumentParser()
+        parser.add_argument("experiment_name")
+        parser.add_argument("gpu_id")
+        for key, value in config.items():
+            if type(value) == bool:
+                parser.add_argument("--" + key, default=value, action="store_true")
+            else:
+                parser.add_argument("--" + key, default=value, type=type(value))
+        for key, value in vars(parser.parse_args()).items():
+            if key in config:
+                config[key] = value
+        if "load_model_from_exp" in config and config["load_model_from_exp"]:
+            parent_config = util.initialize_config(config["load_model_from_exp"])
+            config["max_training_sentences"] = parent_config["max_training_sentences"]
+            config["ffnn_size"] = parent_config["ffnn_size"]
         # Set up device
         self.device = torch.device('cpu' if gpu_id < 0 else f'cuda:{gpu_id}')
         self.bert_device = self.config["bert_device"] if "bert_device" in self.config else None
@@ -128,7 +131,7 @@ class Runner:
         os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
         while True:
             try:
-                wandb.init(project="coref-multiling-2024", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
+                wandb.init(project="coref-multiling", entity="zcu-nlp", config=self.config, reinit=True, name=config_name + "_" + self.name_suffix)
                 break
             except (requests.exceptions.ConnectionError, ConnectionRefusedError, wandb.errors.UsageError) as e:
                 logger.error(e)
@@ -140,7 +143,7 @@ class Runner:
         # model.bert = None
         if saved_suffix:
             self.load_model_checkpoint(model, saved_suffix)
-        if "load_model_from_exp" in self.config:
+        if "load_model_from_exp" in self.config and self.config["load_model_from_exp"]:
             exp_name = self.config["load_model_from_exp"]
             if self.config["use_old_pretrained_models"]:
                 exp_name += "_23"
@@ -697,8 +700,8 @@ def compare_models(m1, m2):
 if __name__ == '__main__':
     config_name, gpu_id = sys.argv[1], int(sys.argv[2])
     runner = Runner(config_name, gpu_id)
-    udapi_io.convert_all_to_text(runner.config)
-    exit(0)
+    # udapi_io.convert_all_to_text(runner.config)
+    # exit(0)
     # model = runner.initialize_model()
     if runner.config["use_half_precision"]:
         from torch.cuda.amp import autocast

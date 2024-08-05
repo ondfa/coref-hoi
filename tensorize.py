@@ -13,6 +13,11 @@ import itertools
 logger = logging.getLogger(__name__)
 
 
+def filter_language(data, filter_ids):
+    logger.info("filtering out data for language")
+    return [(doc_key, tensor) for doc_key, tensor in data if doc_key not in filter_ids]
+
+
 class CorefDataProcessor:
     def __init__(self, config, language=None):
         if language is None:
@@ -24,6 +29,9 @@ class CorefDataProcessor:
         self.max_seg_len = config['max_segment_len']
         self.max_training_seg = config['max_training_sentences']
         self.data_dir = config['data_dir']
+        if config["zero_shot"]:
+            self.data_dir = config["joined_data_dir"]
+            self.language = language = "all-corefud"
 
         # Get tensorized samples
         cache_path = self.get_cache_path()
@@ -37,7 +45,7 @@ class CorefDataProcessor:
             # Generate tensorized samples
             self.tensor_samples = {}
             if "load_model_from_exp" in self.config and config["load_model_from_exp"]:
-                print("loading parent data...")
+                logger.info("loading parent data...")
                 parent_config = util.initialize_config(config["load_model_from_exp"])
                 parent_config["use_cache"] = True
                 parent_data = CorefDataProcessor(parent_config, language=parent_config["language"])
@@ -61,6 +69,12 @@ class CorefDataProcessor:
             # Cache tensorized samples
             with open(cache_path, 'wb') as f:
                 pickle.dump((self.tensor_samples, self.stored_info), f)
+        if config["zero_shot"]:
+            train_path = join(config['data_dir'], f'{config["language"]}-train.{config["max_train_segment_len"] if "max_train_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines')
+            with open(train_path, 'r') as f:
+                samples = [json.loads(line) for line in f.readlines()]
+                excluded_ids = set([example['doc_key'] for example in samples])
+                self.tensor_samples["trn"] = filter_language(self.tensor_samples["trn"], excluded_ids)
 
     @classmethod
     def convert_to_torch_tensor(cls, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
