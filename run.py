@@ -96,11 +96,6 @@ class Runner:
         # Set up config
         self.config = config = util.initialize_config(config_name)
 
-        # Set up logger
-        log_path = join(self.config['log_dir'], 'log_' + self.name_suffix + '.txt')
-        logger.addHandler(logging.FileHandler(log_path, 'a'))
-        logger.info('Log file path: %s' % log_path)
-
         # Set up seed
         if seed:
             util.set_seed(seed)
@@ -115,7 +110,15 @@ class Runner:
         for key, value in vars(parser.parse_args()).items():
             if key in config:
                 config[key] = value
+                
+        # Set up logger
+        log_path = join(self.config['log_dir'], 'log_' + self.name_suffix + '.txt')
+        logger.addHandler(logging.FileHandler(log_path, 'a'))
+        logger.info('Log file path: %s' % log_path)
+
         if "load_model_from_exp" in config and config["load_model_from_exp"]:
+            if self.config["use_large_pretrained_model"]:
+                config["load_model_from_exp"] += "_large"
             parent_config = util.initialize_config(config["load_model_from_exp"])
             config["max_training_sentences"] = parent_config["max_training_sentences"]
             config["ffnn_size"] = parent_config["ffnn_size"]
@@ -486,12 +489,14 @@ class Runner:
         evaluator = CorefEvaluator()
         doc_to_prediction = {}
         doc_span_to_head = {}
+        model.eval()
+        torch.cuda.empty_cache()
         if model.device != self.device:
             model.to(self.device)
             model.bert.to(model.bert_device)
         predicted_spans, predicted_antecedents, predicted_clusters = [], [], []
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
-        for i, (doc_key, tensor_example) in enumerate(tqdm(tensor_examples)):
+        for i, (doc_key, tensor_example) in enumerate(tensor_examples):
             model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
             gold_clusters = stored_info['gold'][doc_key]
             tensor_example = tensor_example[:-4]  # Strip out gold
