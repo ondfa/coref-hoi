@@ -9,16 +9,8 @@ from os.path import join
 
 
 def eval(runner, model, stored_info, examples_dev, examples_test):
-    if isinstance(runner.config['conll_eval_path'], list):
-        eval_func = runner.eval_multi
-    else:
-        eval_func = runner.evaluate
-    eval_func(model, examples_dev, stored_info, 0, official=True, conll_path=runner.config['conll_eval_path'], save_predictions=True, phase="dev")  # Eval dev
-    if isinstance(runner.config['conll_test_path'], list):
-        eval_func = runner.eval_multi
-    else:
-        eval_func = runner.evaluate
-    eval_func(model, examples_test, stored_info, 0, official=True, conll_path=runner.config['conll_test_path'], save_predictions=True, phase="test")  # Eval test
+    runner.evaluate(model, examples_dev, stored_info, 0, official=True, conll_path=runner.config['conll_eval_path'], save_predictions=True, phase="dev")  # Eval dev
+    runner.evaluate(model, examples_test, stored_info, 0, official=True, conll_path=runner.config['conll_test_path'], save_predictions=True, phase="test")  # Eval test
 
 
 def evaluate(config_name, gpu_id, saved_suffix):

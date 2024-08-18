@@ -50,8 +50,8 @@ def load_wandb_api_key(path):
     data = data.strip()
     return data
 
-def evaluate_coreud(gold_path, pred_path):
-    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path]
+def evaluate_coreud(gold_path, pred_path, python_cmd):
+    cmd = [python_cmd, "corefud-scorer/corefud-scorer.py", gold_path, pred_path]
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     stdout, stderr = process.communicate()
     process.wait()
@@ -307,7 +307,6 @@ class Runner:
         logger.info('**********Dev eval**********')
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=False, conll_path=self.config['conll_eval_path'])
         logger.info('**********Test eval**********')
-        #TODO test data eval
         f1, _ = self.evaluate(model, examples_dev, stored_info, len(loss_history), official=True, conll_path=self.config['conll_test_path'], save_predictions=True, phase="test")
         if best_model_path is not None:
             logger.info('**********Best model evaluation**********')
@@ -319,11 +318,11 @@ class Runner:
         # Wrap up
         return loss_history
 
-    def find_cross_segment_coreference(self, examples, segment_len=1):
+    def find_cross_segment_coreference(self, examples, segment_len=1, nearest_only=False):
         cross_segment_corefs = []
         cross_examples = []
         for example in examples:
-            segment_lens = example[1][3]
+            segment_lens = torch.cumsum(example[1][3], dim=0)
             cluster_ids = example[1][-1]
             mention_span_starts = example[1][-3]
             cluster_segment_ids = torch.sum(torch.unsqueeze(mention_span_starts, dim=0) > torch.unsqueeze(segment_lens, dim=1), dim=0)
@@ -331,11 +330,42 @@ class Runner:
             # different_segment = torch.triu(torch.abs(torch.unsqueeze(cluster_segment_ids, dim=0) - torch.unsqueeze(cluster_segment_ids, dim=1)) >= segment_len, diagonal=1)
             different_segment = torch.triu((torch.unsqueeze(cluster_segment_ids, dim=0) // segment_len) != (torch.unsqueeze(cluster_segment_ids, dim=1) // segment_len), diagonal=1)
             cross_segment = same_cluster & different_segment
+            if nearest_only and torch.any(same_cluster):
+                cross_segment &= torch.argmax(same_cluster.to(dtype=torch.int), dim=1, keepdim=True) == torch.unsqueeze(torch.arange(same_cluster.shape[0]), dim=0)
             cross_segment_corefs.append(cross_segment)
             if torch.any(cross_segment):
                 cross_examples.append(example)
                 print("Cross-segment coreference found.")
         return cross_examples, cross_segment_corefs
+
+    def compute_cross_segment_recall(self, examples, doc2pred, max_segments, heads_only=True):
+        correct_mentions = 0
+        correct_corefs = 0
+        sum = 0
+        for example in examples:
+            m2c = {}
+            for i, cluster in enumerate(doc2pred[example[0]]):
+                for mention in cluster:
+                    m2c[mention] = i
+            gold_starts, gold_ends, gold_heads = example[1][-3], example[1][-2], example[1][-4]
+            _, nearest_cross_corefs = self.find_cross_segment_coreference([example], max_segments, nearest_only=True)
+            for ante, mention in zip(*torch.nonzero(nearest_cross_corefs[0], as_tuple=True)):
+                if heads_only:
+                    ante_span = gold_heads[ante].item(), gold_heads[ante].item()
+                    mention_span = gold_heads[mention].item(), gold_heads[mention].item()
+                else:
+                    ante_span = gold_starts[ante].item(), gold_ends[ante].item()
+                    mention_span = gold_starts[mention].item(), gold_ends[mention].item()
+                sum += 1
+                if ante_span in m2c and mention_span in m2c:
+                    correct_mentions += 1
+                    if m2c[ante_span] == m2c[mention_span]:
+                        correct_corefs += 1
+        if sum == 0:
+            return 0, 0, 0
+        mention_recall = correct_mentions / sum
+        coref_recall = correct_corefs / sum
+        return mention_recall, coref_recall, sum
 
     def filter_gold_data(self, tensor_examples, gold_data):
         res_docs = []
@@ -344,145 +374,6 @@ class Runner:
             if doc.meta["docname"] in ids:
                 res_docs.append(doc)
         return res_docs
-
-    def evaluate(self, model, tensor_examples, stored_info, step, official=False, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
-        if isinstance(conll_path, list):
-            for path in conll_path:
-                self.evaluate(model, tensor_examples, stored_info, step, official, path, tb_writer, save_predictions, phase)
-            return 0.0, None
-        dataset = conll_path.split("/")[-1].split("-")[0]
-        if self.config["eval_cross_segment"] or self.config["filter_long_mentions"]:
-            gold_data = udapi_io.read_data(conll_path)
-            if self.config["eval_cross_segment"]:
-                tensor_examples, _ = self.find_cross_segment_coreference(tensor_examples, self.config["max_training_sentences"])
-                gold_data = self.filter_gold_data(tensor_examples, gold_data)
-            elif self.config["filter_long_mentions"]:
-                gold_data = udapi_io.filter_long_mentions(gold_data, self.config["max_mention_length"])
-            gold_fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
-            udapi_io.write_data(gold_data, gold_fd)
-            gold_fd.flush()
-            conll_path = gold_fd.name
-        if model.device != self.device:
-            model.to(self.device)
-            model.bert.to(model.bert_device)
-        # print(model.device)
-        evaluator = CorefEvaluator()
-        doc_to_prediction = {}
-        doc_span_to_head = {}
-
-        model.eval()
-        torch.cuda.empty_cache()
-        max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
-        for i, (doc_key, tensor_example) in enumerate(tensor_examples):
-            model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
-            gold_clusters = stored_info['gold'][doc_key]
-            tensor_example = tensor_example[:-4]  # Strip out gold
-            num_sentences = tensor_example[0].shape[0]
-            if num_sentences <= max_sentences:
-                batch_examples = [tensor_example]
-            else:
-                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=1 if self.config["max_segment_overlap"] else None)
-                if self.config["max_segment_overlap"]:
-                    batch_examples = batch_examples[:-max_sentences]
-            predicted_clusters = []
-            mention_to_cluster_id = {}
-            span_to_head = {}
-            # all_span_starts = []
-            # all_span_ends = []
-            # all_antecedent_idx = []
-            # all_antecedent_scores = []
-            # antecedent_offset = 0
-            for j, example in enumerate(batch_examples):
-                example_gpu = [d.to(self.device) for d in example]
-                with torch.no_grad():
-                    _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
-                    offset = j if self.config["max_segment_overlap"] else j * max_sentences
-                    # num_antecedents_in_first_segment = torch.sum(span_starts < example_gpu[3][0])
-                    # if self.config["max_segment_overlap"]:
-                    #     if j > 0 and example[0].shape[0] > 1:
-                            # original_ids = torch.arange(span_starts.shape[0], device=span_starts.device)[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1]]
-                            # span_ends = span_ends[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1]]
-                            # shifts = original_ids - torch.arange(span_ends.shape[0], device=span_starts.device)
-                            # antecedent_idx = antecedent_idx[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1], :]
-                            # antecedent_idx -= torch.unsqueeze(shifts, dim=1)
-                            # antecedent_scores = antecedent_scores[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1], :]
-                            # span_starts = span_starts[span_starts >= torch.sum(example_gpu[3]) - example_gpu[3][-1]]
-                    # antecedent_idx += antecedent_offset
-                    # if self.config["max_segment_overlap"]:
-                    #     antecedent_offset += num_antecedents_in_first_segment
-                    # else:
-                    #     antecedent_offset += span_starts.shape[0]
-                    sentence_len = tensor_example[3]
-                    word_offset = sentence_len[:offset].sum()
-                    span_starts = span_starts + word_offset
-                    span_ends = span_ends + word_offset
-                example_gpu = [e.detach().cpu() for e in example_gpu]
-                if span2head_logits is not None:
-                    heads = model.predict_heads(span_starts, span_ends, span2head_logits)
-                    model.get_mention2head_map(span_starts.tolist(), span_ends.tolist(), heads, span_to_head)
-                span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
-                antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
-                # all_span_starts.extend(span_starts)
-                # all_span_ends.extend(span_ends)
-                # all_antecedent_idx.extend(antecedent_idx)
-                # all_antecedent_scores.extend(antecedent_scores)
-                tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
-                if self.config["max_segment_overlap"] and self.config["filter_overlapping_mentions"] and j > 0:
-                    tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:offset + max_sentences].sum() - 1)
-                if self.config["max_segment_overlap"]:
-                    predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id)
-                else:
-                    predicted_clusters.extend(tmp_predicted_clusters)
-                    mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
-            predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
-            # predicted_clusters = model.update_evaluator(all_span_starts, all_span_ends, all_antecedent_idx, all_antecedent_scores, gold_clusters, evaluator)
-            if self.config["filter_singletons"]:
-                predicted_clusters = util.discard_singletons(predicted_clusters)
-            doc_to_prediction[doc_key] = predicted_clusters
-            if span2head_logits is not None:
-                doc_span_to_head[doc_key] = span_to_head
-        p, r, f = evaluator.get_prf()
-        metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100}
-        metrics[phase + "_" + dataset + "_Avg_Precision"] = p * 100
-        metrics[phase + "_" + dataset + "_Avg_Recall"] = r * 100
-        metrics[phase + "_" + dataset + "_Avg_F1"] = f * 100
-        if official:
-            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(conll_path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head)
-            if self.config["filter_long_mentions"]:
-                udapi_docs = udapi_io.filter_long_mentions(udapi_docs, self.config["max_mention_length"])
-            if save_predictions:
-                path = join(self.config['log_dir'], self.name_suffix + "_pred_" + phase + "_" + conll_path.split("/")[-1])
-                fd = open(path, "wt", encoding="utf-8")
-            else:
-                fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
-            udapi_io.write_data(udapi_docs, fd)
-            fd.flush()
-            gold_path = os.path.join(os.path.split(conll_path)[0], "gold", os.path.split(conll_path)[-1])
-            if not os.path.exists(gold_path):
-                gold_path = conll_path
-            logger.info(gold_path)
-            score, score_with_singletons = evaluate_coreud(gold_path, fd.name)
-            metrics[phase + "_corefud_score"] = score
-            metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
-            metrics[phase + "_" + dataset + "_corefud_score"] = score
-            metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
-            if save_predictions and self.config["final_path"]:
-                if not os.path.exists(self.config["final_path"]):
-                    os.makedirs(self.config["final_path"])
-                shutil.copyfile(fd.name, os.path.join(self.config["final_path"], conll_path.split("/")[-1]))
-            fd.close()
-        for name, score in metrics.items():
-            logger.info('%s: %.2f' % (name, score))
-            wandb.run.summary[name] = score
-            if tb_writer:
-                tb_writer.add_scalar(name, score, step)
-        wandb.log(metrics)
-
-        if self.config["eval_cross_segment"]:
-            gold_fd.close()
-        if official:
-            return metrics[phase + "_corefud_score"], metrics
-        return f * 100, metrics
 
     def predict(self, model, tensor_examples, stored_info):
         logger.info('Predicting %d samples...' % len(tensor_examples))
@@ -494,9 +385,12 @@ class Runner:
         if model.device != self.device:
             model.to(self.device)
             model.bert.to(model.bert_device)
-        predicted_spans, predicted_antecedents, predicted_clusters = [], [], []
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
-        for i, (doc_key, tensor_example) in enumerate(tensor_examples):
+        overlap = max_sentences - 1 if self.config["segment_overlap"] == "max" else self.config["segment_overlap"]
+        if overlap >= max_sentences:
+            overlap = max_sentences - 1
+        split_step = max_sentences - overlap
+        for doc_key, tensor_example in tensor_examples:
             model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
             gold_clusters = stored_info['gold'][doc_key]
             tensor_example = tensor_example[:-4]  # Strip out gold
@@ -504,18 +398,17 @@ class Runner:
             if num_sentences <= max_sentences:
                 batch_examples = [tensor_example]
             else:
-                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=1 if self.config["max_segment_overlap"] else None)
-                if self.config["max_segment_overlap"]:
-                    batch_examples = batch_examples[:-max_sentences]
+                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=split_step)
+                # if self.config["segment_overlap"]:
+                #     batch_examples = batch_examples[:-max_sentences]
             predicted_clusters = []
             mention_to_cluster_id = {}
             span_to_head = {}
-
+            offset = 0
             for j, example in enumerate(batch_examples):
                 example_gpu = [d.to(self.device) for d in example]
                 with torch.no_grad():
                     _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
-                    offset = j if self.config["max_segment_overlap"] else j * max_sentences
                     sentence_len = tensor_example[3]
                     word_offset = sentence_len[:offset].sum()
                     span_starts = span_starts + word_offset
@@ -527,26 +420,48 @@ class Runner:
                 span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
                 antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
                 tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
-                if self.config["max_segment_overlap"] and self.config["filter_overlapping_mentions"] and j > 0:
-                    tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:offset + max_sentences].sum() - 1)
-                if self.config["max_segment_overlap"]:
-                    predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id)
+                if overlap > 0 and self.config["filter_overlapping_mentions"] and j > 0:
+                    tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:offset + max_sentences].sum() - 1, split_step)
+                if overlap > 0:
+                    predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id, merge_first_n=self.config["first_mentions_to_merge"])
                 else:
                     predicted_clusters.extend(tmp_predicted_clusters)
                     mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
                     predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
+                offset += split_step
 
             if self.config["filter_singletons"]:
                 predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters
             if span2head_logits is not None:
                 doc_span_to_head[doc_key] = span_to_head
-        return doc_to_prediction, doc_span_to_head
+        return doc_to_prediction, doc_span_to_head, evaluator
         
-    def eval_multi(self, model, tensor_examples, stored_info, step, official=True, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
-        metrics = {}
-        doc_to_prediction, doc_span_to_head = self.predict(model, tensor_examples, stored_info)
-        for path in conll_path:
+    def evaluate(self, model, tensor_examples, stored_info, step, official=True, conll_path=None, tb_writer=None, save_predictions=False, phase="eval"):
+        if not isinstance(conll_path, list):
+            conll_path = [conll_path]
+        doc_to_prediction, doc_span_to_head, evaluator = self.predict(model, tensor_examples, stored_info)
+        p, r, f = evaluator.get_prf()
+        metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100,
+                   phase + '_avg_corefud_score': 0.0, phase + "_avg_corefud_score_with_singletons": 0.0}
+        if self.config["eval_cross_segment"]:
+            mention_rec, coref_rec, count = self.compute_cross_segment_recall(tensor_examples, doc_to_prediction, self.config["max_pred_sentences"], heads_only=self.config["heads_only"])
+            metrics["cross_segment_mentions_recall"] = mention_rec
+            metrics["cross_segment_coreference_recall"] = coref_rec
+            metrics["cross_segment_coreferences"] = count
+        for i, path in enumerate(conll_path):
+            if self.config["eval_cross_segment"] or self.config["filter_long_mentions"]:
+                gold_data = udapi_io.read_data(conll_path)
+                if self.config["eval_cross_segment"]:
+                    tensor_examples, _ = self.find_cross_segment_coreference(tensor_examples, self.config["max_pred_sentences"])
+                    gold_data = self.filter_gold_data(tensor_examples, gold_data)
+                elif self.config["filter_long_mentions"]:
+                    gold_data = udapi_io.filter_long_mentions(gold_data, self.config["max_mention_length"])
+                gold_fd = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8")
+                udapi_io.write_data(gold_data, gold_fd)
+                gold_fd.flush()
+                path = gold_fd.name
+
             dataset = path.split("/")[-1].split("-")[0]
             udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head)
             if self.config["filter_long_mentions"]:
@@ -562,9 +477,11 @@ class Runner:
             if not os.path.exists(gold_path):
                 gold_path = path
             logger.info(gold_path)
-            score, score_with_singletons = evaluate_coreud(gold_path, fd.name)
+            score, score_with_singletons = evaluate_coreud(gold_path, fd.name, self.config["python_cmd"])
             metrics[phase + "_corefud_score"] = score
             metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
+            metrics[phase + "_avg_corefud_score"] = (metrics[phase + "_avg_corefud_score"] * i + score) / (i + 1)
+            metrics[phase + "_avg_corefud_score_with_singletons"] = (metrics[phase + "_avg_corefud_score_with_singletons"] * i + score_with_singletons) / (i + 1)
             metrics[phase + "_" + dataset + "_corefud_score"] = score
             metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
             if save_predictions and self.config["final_path"]:
@@ -572,12 +489,15 @@ class Runner:
                     os.makedirs(self.config["final_path"])
                 shutil.copyfile(fd.name, os.path.join(self.config["final_path"], path.split("/")[-1]))
             fd.close()
+            if self.config["eval_cross_segment"] or self.config["filter_long_mentions"]:
+                gold_fd.close()
         for name, score in metrics.items():
             logger.info('%s: %.2f' % (name, score))
             wandb.run.summary[name] = score
+            if tb_writer:
+                tb_writer.add_scalar(name, score, step)
         wandb.log(metrics)
-
-        return metrics[phase + "_corefud_score"], metrics
+        return metrics[phase + "_avg_corefud_score"], metrics
     
     
     def get_optimizer(self, model):
@@ -602,27 +522,6 @@ class Runner:
             optimizers.append(AdamW(grouped_bert_param, lr=self.config['bert_learning_rate'], eps=self.config['adam_eps']))
             optimizers.append(Adam(model.get_params()[1], lr=self.config['task_learning_rate'], eps=self.config['adam_eps'], weight_decay=0))
         return optimizers
-        # grouped_parameters = [
-        #     {
-        #         'params': [p for n, p in bert_param if not any(nd in n for nd in no_decay)],
-        #         'lr': self.config['bert_learning_rate'],
-        #         'weight_decay': self.config['adam_weight_decay']
-        #     }, {
-        #         'params': [p for n, p in bert_param if any(nd in n for nd in no_decay)],
-        #         'lr': self.config['bert_learning_rate'],
-        #         'weight_decay': 0.0
-        #     }, {
-        #         'params': [p for n, p in task_param if not any(nd in n for nd in no_decay)],
-        #         'lr': self.config['task_learning_rate'],
-        #         'weight_decay': self.config['adam_weight_decay']
-        #     }, {
-        #         'params': [p for n, p in task_param if any(nd in n for nd in no_decay)],
-        #         'lr': self.config['task_learning_rate'],
-        #         'weight_decay': 0.0
-        #     }
-        # ]
-        # optimizer = AdamW(grouped_parameters, lr=self.config['task_learning_rate'], eps=self.config['adam_eps'])
-        # return optimizer
 
     def get_scheduler(self, optimizers, total_update_steps):
         # Only warm up bert lr

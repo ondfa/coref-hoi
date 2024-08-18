@@ -31,6 +31,8 @@ def initialize_config(config_name):
         parent_config = initialize_config(config["load_model_from_exp"])
         config["max_training_sentences"] = parent_config["max_training_sentences"]
         config["ffnn_size"] = parent_config["ffnn_size"]
+    if "max_pred_sentences" not in config:
+        config["max_pred_sentences"] = config["max_training_sentences"]
     return config
 
 

@@ -872,18 +872,22 @@ class CorefModel(nn.Module):
         evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
         return predicted_clusters
 
-    def merge_clusters(self, first_clusters, first_m2c, second_clusters, second_m2c):
+    def merge_clusters(self, first_clusters, first_m2c, second_clusters, second_m2c, merge_first_n=None):
         res_clusters = copy.deepcopy(first_clusters)
         res_m2c = copy.deepcopy(first_m2c)
+        if merge_first_n is None or merge_first_n < 0:
+            merge_first_n = 2 ** 30
         for cluster in second_clusters:
             found = False
-            for mention in cluster:
-                if mention in first_m2c:
-                    cluster_id = first_m2c[mention]
+            num_mentions = min(merge_first_n, len(cluster))
+            for i in range(num_mentions):
+                mention = cluster[i]
+                if mention in res_m2c:
+                    cluster_id = res_m2c[mention]
                     found = True
-                    if cluster == first_clusters[cluster_id]:
+                    if cluster == res_clusters[cluster_id]:
                         break
-                    res_clusters[cluster_id] = tuple(sorted(list(set(first_clusters[cluster_id]) | set(cluster))))
+                    res_clusters[cluster_id] = tuple(sorted(list(set(res_clusters[cluster_id]) | set(cluster))))
                     for mention in cluster:
                         if mention in res_m2c and res_m2c[mention] != cluster_id:
                             res_clusters[res_m2c[mention]] = tuple(sorted(list(set(res_clusters[res_m2c[mention]]) - {mention})))
@@ -891,6 +895,8 @@ class CorefModel(nn.Module):
                     break
             if not found:
                 for mention in cluster:
+                    if mention in res_m2c:
+                        res_clusters[res_m2c[mention]] = tuple(sorted(list(set(res_clusters[res_m2c[mention]]) - {mention})))
                     res_m2c[mention] = len(res_clusters)
                 res_clusters.append(cluster)
         res_clusters = [cluster for cluster in res_clusters if len(cluster) > 0]
@@ -900,13 +906,13 @@ class CorefModel(nn.Module):
                 res_m2c[mention] = i
         return res_clusters, res_m2c
 
-    def filter_overlapping(self, clusters, m2c, end):
+    def filter_overlapping(self, clusters, m2c, end, step):
         res_clusters = []
         res_m2c = {}
         for i, cluster in enumerate(clusters):
             found = False
             for mention in cluster:
-                if mention[1] > end - self.config["max_segment_len"]:
+                if mention[1] > end - self.config["max_segment_len"] * step:
                     found = True
                     break
             if found:
