@@ -72,10 +72,6 @@ def filter_long_mentions(udapi_docs, max_len=1):
 
 
 def convert_all_to_text(config):
-    # docs = read_data(config["conll_eval_path"])
-    # out_file = config["conll_eval_path"].replace("conllu", "txt")
-    # convert_to_text(docs, out_file)
-
     input_path = config["conll_eval_path"]
     gold_path = os.path.join(os.path.split(input_path)[0], "gold", os.path.split(input_path)[-1])
     if os.path.exists(gold_path):
@@ -83,35 +79,58 @@ def convert_all_to_text(config):
         out_file = gold_path.replace(".conllu", "-GOLD.txt")
         convert_to_text(docs, out_file)
 
-    docs = read_data(config["conll_test_path"])
-    out_file = config["conll_eval_path"].replace("conllu", "txt")
+    docs = read_data(input_path)
+    out_file = input_path.replace("conllu", "txt")
+    convert_to_text(docs, out_file, solve_empty_nodes=False)
+
+    out_file = input_path.replace(".conllu", "-BLIND.txt")
+    convert_to_text(docs, out_file, mark_entities=False, solve_empty_nodes=False)
+    
+    out_file = input_path.replace(".conllu", "-ZEROS-BLIND.txt")
+    convert_to_text(docs, out_file, mark_entities=False)
+    
+    out_file = input_path.replace(".conllu", "-ZEROS.txt")
     convert_to_text(docs, out_file)
 
+    input_path = config["conll_test_path"]
+    docs = read_data(input_path)
+    out_file = config["conll_test_path"].replace(".conllu", "-BLIND.txt")
+    convert_to_text(docs, out_file, solve_empty_nodes=False)
+    
+    out_file = config["conll_test_path"].replace(".conllu", "-ZEROS-BLIND.txt")
+    convert_to_text(docs, out_file)
     # input_path = config["conll_eval_path"].replace("-dev", "-train")
     # docs = read_data(input_path)
     # out_file = input_path.replace("conllu", "txt")
     # convert_to_text(docs, out_file)
 
-def convert_to_text(docs, out_file):
+
+def convert_to_text(docs, out_file, solve_empty_nodes=True, mark_entities=True):
     with open(out_file, "w", encoding="utf-8") as f:
         for doc in docs:
             out_words = []
-            udapi_words = [word for word in doc.nodes_and_empty]
+            if solve_empty_nodes:
+                udapi_words = [word for word in doc.nodes_and_empty]
+            else:
+                udapi_words = [word for word in doc.nodes]
             for word in udapi_words:
                 out_word = word.form
+                if word.lemma.startswith("#") and solve_empty_nodes:
+                    out_word += word.lemma
                 mentions = []
-                for mention in set(word.coref_mentions):
-                    span = mention.span
-                    if "," in span:
-                        span = span.split(",")[0]
-                    mention_start = float(span.split("-")[0])
-                    mention_end = float(span.split("-")[1]) if "-" in span else mention_start
-                    if mention_start == float(word.ord) and mention_end == float(word.ord):
-                        mentions.append(f"({mention.entity.eid})")
-                    elif mention_start == float(word.ord):
-                        mentions.append(f"({mention.entity.eid}")
-                    elif mention_end == float(word.ord):
-                        mentions.append(f"{mention.entity.eid})")
+                if mark_entities:
+                    for mention in set(word.coref_mentions):
+                        span = mention.span
+                        if "," in span:
+                            span = span.split(",")[0]
+                        mention_start = float(span.split("-")[0])
+                        mention_end = float(span.split("-")[1]) if "-" in span else mention_start
+                        if mention_start == float(word.ord) and mention_end == float(word.ord):
+                            mentions.append(f"({mention.entity.eid})")
+                        elif mention_start == float(word.ord):
+                            mentions.append(f"({mention.entity.eid}")
+                        elif mention_end == float(word.ord):
+                            mentions.append(f"{mention.entity.eid})")
                 if len(mentions) > 0:
                     out_words.append(f"{out_word}|{','.join(mentions)}")
                 else:
