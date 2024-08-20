@@ -396,40 +396,42 @@ class Runner:
             tensor_example = tensor_example[:-4]  # Strip out gold
             num_sentences = tensor_example[0].shape[0]
             if num_sentences <= max_sentences:
-                batch_examples = [tensor_example]
+                batch_examples = [[tensor_example]]
             else:
-                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=split_step)
+                batch_examples = Tensorizer(self.config, local_files_only=True, load_tokenizer=False).split_example(*tensor_example, step=split_step, subdoc_lens=stored_info["subdocs_lens"][doc_key])
                 # if self.config["segment_overlap"]:
                 #     batch_examples = batch_examples[:-max_sentences]
             predicted_clusters = []
             mention_to_cluster_id = {}
             span_to_head = {}
-            offset = 0
-            for j, example in enumerate(batch_examples):
-                example_gpu = [d.to(self.device) for d in example]
-                with torch.no_grad():
-                    _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
-                    sentence_len = tensor_example[3]
-                    word_offset = sentence_len[:offset].sum()
-                    span_starts = span_starts + word_offset
-                    span_ends = span_ends + word_offset
-                example_gpu = [e.detach().cpu() for e in example_gpu]
-                if span2head_logits is not None:
-                    heads = model.predict_heads(span_starts, span_ends, span2head_logits)
-                    model.get_mention2head_map(span_starts.tolist(), span_ends.tolist(), heads, span_to_head)
-                span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
-                antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
-                tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
-                if overlap > 0 and self.config["filter_overlapping_mentions"] and j > 0:
-                    tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:offset + max_sentences].sum() - 1, split_step)
-                if overlap > 0:
-                    predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id, merge_first_n=self.config["first_mentions_to_merge"])
-                else:
-                    predicted_clusters.extend(tmp_predicted_clusters)
-                    mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
-                    predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
-                offset += split_step
-
+            base_offset = 0
+            for subdoc, subdoc_segments in zip(batch_examples, stored_info["subdocs_lens"][doc_key]):
+                offset = 0
+                for j, example in enumerate(subdoc):
+                    example_gpu = [d.to(self.device) for d in example]
+                    with torch.no_grad():
+                        _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
+                        sentence_len = tensor_example[3]
+                        word_offset = sentence_len[:base_offset + offset].sum()
+                        span_starts = span_starts + word_offset
+                        span_ends = span_ends + word_offset
+                    example_gpu = [e.detach().cpu() for e in example_gpu]
+                    if span2head_logits is not None:
+                        heads = model.predict_heads(span_starts, span_ends, span2head_logits)
+                        model.get_mention2head_map(span_starts.tolist(), span_ends.tolist(), heads, span_to_head)
+                    span_starts, span_ends = span_starts.tolist(), span_ends.tolist()
+                    antecedent_idx, antecedent_scores = antecedent_idx.tolist(), antecedent_scores.tolist()
+                    tmp_predicted_clusters, tmp_mention_to_cluster_id, _ = model.get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_scores)
+                    if overlap > 0 and self.config["filter_overlapping_mentions"] and j > 0:
+                        tmp_predicted_clusters, tmp_mention_to_cluster_id = model.filter_overlapping(tmp_predicted_clusters, tmp_mention_to_cluster_id, sentence_len[:base_offset + offset + max_sentences].sum() - 1, split_step)
+                    if overlap > 0:
+                        predicted_clusters, mention_to_cluster_id = model.merge_clusters(predicted_clusters, mention_to_cluster_id, tmp_predicted_clusters, tmp_mention_to_cluster_id, merge_first_n=self.config["first_mentions_to_merge"])
+                    else:
+                        predicted_clusters.extend(tmp_predicted_clusters)
+                        mention_to_cluster_id = {**tmp_mention_to_cluster_id, **mention_to_cluster_id}
+                        predicted_clusters = model.update_evaluator_from_clusters(predicted_clusters, mention_to_cluster_id, gold_clusters, evaluator)
+                    offset += split_step
+                base_offset += subdoc_segments
             if self.config["filter_singletons"]:
                 predicted_clusters = util.discard_singletons(predicted_clusters)
             doc_to_prediction[doc_key] = predicted_clusters

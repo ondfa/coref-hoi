@@ -62,6 +62,7 @@ class DocumentState(object):
         self.subtoken_map = []
         self.token_end = []
         self.sentence_end = []
+        self.subdoc_end = []
         self.info = []  # Only non-none for the first subtoken of each word
 
         # Linear list mapped to subtokens with CLS, SEP
@@ -256,6 +257,7 @@ class DocumentState(object):
         merged_clusters = [list(cluster) for cluster in merged_clusters]
         all_mentions = util.flatten(merged_clusters)
         sentence_map = get_sentence_map(self.segments, self.sentence_end, use_sep, use_cls)
+        subdoc_map = get_sentence_map(self.segments, self.subdoc_end, use_sep, use_cls)
         subtoken_map = util.flatten(self.segment_subtoken_map)
 
 
@@ -332,6 +334,7 @@ class DocumentState(object):
             "constituents": [],
             "ner": [],
             "clusters": merged_clusters,
+            "subdocument_map": subdoc_map,
             'sentence_map': sentence_map,
             "subtoken_map": subtoken_map,
             'pronouns': self.pronouns,
@@ -388,18 +391,70 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
         curr_idx = end_idx + 1
         prev_token_idx = subtoken_map[-1]
 
+def split_into_segments_multiconstraints(document_state: DocumentState, max_seg_len, constraints, constraint_names, tokenizer):
+    """ Split into segments.
+        Add subtokens, subtoken_map, info for each segment; add CLS, SEP in the segment subtokens
+        Input document_state: tokens, subtokens, token_end, sentence_end, utterance_end, subtoken_map, info
+    """
+    curr_idx = 0  # Index for subtokens
+    prev_token_idx = 0
+    while curr_idx < len(document_state.subtokens):
+        for constraint, constraint_name in zip(constraints, constraint_names):
+            logger.info(f"splitting at {constraint_name}...")
+            # Try to split at a sentence end point
+            end_idx = min(curr_idx + max_seg_len - 1 - 2, len(document_state.subtokens) - 1)  # Inclusive
+            while end_idx >= curr_idx and not constraint[end_idx]:
+                end_idx -= 1
+            if end_idx >= curr_idx:
+                break
+            logger.info(f'{document_state.doc_key}: no {constraint_name} found; ')
 
-def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, solve_empty_nodes=True, system_empty_nodes=False):
+
+        segment = document_state.subtokens[curr_idx: end_idx + 1]
+        if tokenizer.cls_token is not None:
+            segment.insert(0, tokenizer.cls_token)
+        if tokenizer.sep_token is not None:
+            segment.append(tokenizer.sep_token)
+        document_state.segments.append(segment)
+
+        subtoken_map = document_state.subtoken_map[curr_idx: end_idx + 1]
+        tmp_map = subtoken_map.copy()
+        if tokenizer.cls_token is not None:
+            tmp_map.insert(0, prev_token_idx)
+        if tokenizer.sep_token is not None:
+            tmp_map.append(subtoken_map[-1])
+        document_state.segment_subtoken_map.append(tmp_map)
+
+        tmp_info = document_state.info[curr_idx: end_idx + 1]
+        if tokenizer.cls_token is not None:
+            tmp_info.insert(0, None)
+        if tokenizer.sep_token is not None:
+            tmp_info.append(None)
+        document_state.segment_info.append(tmp_info)
+
+        curr_idx = end_idx + 1
+        prev_token_idx = subtoken_map[-1]
+
+
+def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, solve_empty_nodes=True, system_empty_nodes=False, split_into_subdocs_uppercase=False):
     """ Process raw input to finalized documents """
     document_state = DocumentState(doc_key)
     word_idx = -1
 
     # Build up documents
     last_ord = 0
+    sentence_len = 0
+    sentence_upper = True
     for node in udapi_document.nodes_and_empty:
         if last_ord >= node.ord:
             document_state.sentence_end[-1] = True
+            if split_into_subdocs_uppercase and sentence_upper and sentence_len < len(document_state.subdoc_end):  # Whole sentence uppercased
+                document_state.subdoc_end[-sentence_len] = True
+            sentence_len = 0
+            sentence_upper = True
             # assert len(row) >= 12
+        if not node.form.isupper():
+            sentence_upper = False
         word_idx += 1
         if system_empty_nodes:
             word = "_"
@@ -408,8 +463,10 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, sol
         else:
             word = normalize_word(node.form, language)
         subtokens = tokenizer.tokenize(word)
+        sentence_len += len(subtokens)
         document_state.tokens.append(word)
         document_state.token_end += [False] * (len(subtokens) - 1) + [True]
+        document_state.subdoc_end += [False] * len(subtokens)
         for idx, subtoken in enumerate(subtokens):
             document_state.subtokens.append(subtoken)
             deprel = node.udeprel if node.udeprel is not None else node.deps[0]["deprel"]
@@ -421,8 +478,12 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, sol
     document_state.sentence_end[-1] = True
 
     # Split documents
-    constraits1 = document_state.sentence_end if language != 'arabic' else document_state.token_end
-    split_into_segments(document_state, seg_len, constraits1, document_state.token_end, tokenizer)
+    constraints = [document_state.sentence_end, document_state.token_end]
+    constraint_names = ["sentence end", "token end"]
+    if any(document_state.subdoc_end):
+        constraints.insert(0, document_state.subdoc_end)
+        constraint_names.insert(0, "subdocument end")
+    split_into_segments_multiconstraints(document_state, seg_len, constraints, constraint_names, tokenizer)
     if udapi_document is not None:
         document = document_state.finalize_from_udapi(udapi_document, tokenizer.sep_token is not None, tokenizer.cls_token is not None)
     else:
@@ -435,7 +496,7 @@ def minimize_partition(partition, extension, args, tokenizer):
     input_path = os.path.join(args.data_dir, '..' + ("/sysempty" if args.system_empty_nodes else ""), f'{args.language}-{partition}.{extension}')
     # input_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{extension}')
     print(input_path)
-    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{seg_len}{".empty" if args.solve_empty_nodes else ".sysempty" if args.system_empty_nodes else ""}.jsonlines')
+    output_path = os.path.join(args.data_dir, f'{args.language}-{partition}.{seg_len}{".empty" if args.solve_empty_nodes else ".sysempty" if args.system_empty_nodes else ""}{".split" if args.split_docs_uppercase else ""}.jsonlines')
     doc_count = 0
     logger.info(f'Minimizing {input_path}...')
 
@@ -450,7 +511,7 @@ def minimize_partition(partition, extension, args, tokenizer):
         else:
             udapi_documents = udapi_io.read_data(input_path)
         for doc in udapi_documents:
-            document = get_document(doc.meta["docname"], args.language, seg_len, tokenizer, udapi_documents[doc_count], args.solve_empty_nodes, args.system_empty_nodes)
+            document = get_document(doc.meta["docname"], args.language, seg_len, tokenizer, udapi_documents[doc_count], args.solve_empty_nodes, args.system_empty_nodes, args.split_docs_uppercase)
             output_file.write(json.dumps(document))
             output_file.write('\n')
             doc_count += 1

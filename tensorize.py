@@ -25,6 +25,7 @@ class CorefDataProcessor:
         self.config = config
         self.language = language
         self.empty_suffix = ".empty" if config["solve_empty_nodes"] else "sysempty" if config["system_empty_nodes"] else ""
+        self.additional_flags = "" if "additional_flags" not in self.config else config["additional_flags"]
 
         self.max_seg_len = config['max_segment_len']
         self.max_training_seg = config['max_training_sentences']
@@ -53,9 +54,9 @@ class CorefDataProcessor:
             else:
                 tensorizer = Tensorizer(self.config)
             paths = {
-                'trn': join(self.data_dir, f'{language}-train.{config["max_train_segment_len"] if "max_train_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines'),
-                'dev': join(self.data_dir, f'{language}-dev.{config["max_dev_segment_len"] if "max_dev_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines'),
-                'tst': join(self.data_dir, f'{language}-test.{config["max_test_segment_len"] if "max_test_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines')
+                'trn': join(self.data_dir, f'{language}-train.{config["max_train_segment_len"] if "max_train_segment_len" in config else self.max_seg_len}{self.empty_suffix}{self.additional_flags}.jsonlines'),
+                'dev': join(self.data_dir, f'{language}-dev.{config["max_dev_segment_len"] if "max_dev_segment_len" in config else self.max_seg_len}{self.empty_suffix}{self.additional_flags}.jsonlines'),
+                'tst': join(self.data_dir, f'{language}-test.{config["max_test_segment_len"] if "max_test_segment_len" in config else self.max_seg_len}{self.empty_suffix}{self.additional_flags}.jsonlines')
             }
             for split, path in paths.items():
                 logger.info('Tensorizing examples from %s; results will be cached)' % path)
@@ -70,7 +71,7 @@ class CorefDataProcessor:
             with open(cache_path, 'wb') as f:
                 pickle.dump((self.tensor_samples, self.stored_info), f)
         if config["zero_shot"]:
-            train_path = join(config['data_dir'], f'{config["language"]}-train.{config["max_train_segment_len"] if "max_train_segment_len" in config else self.max_seg_len}{self.empty_suffix}.jsonlines')
+            train_path = join(config['data_dir'], f'{config["language"]}-train.{config["max_train_segment_len"] if "max_train_segment_len" in config else self.max_seg_len}{self.empty_suffix}{self.additional_flags}.jsonlines')
             with open(train_path, 'r') as f:
                 samples = [json.loads(line) for line in f.readlines()]
                 excluded_ids = set([example['doc_key'] for example in samples])
@@ -106,7 +107,7 @@ class CorefDataProcessor:
         return self.stored_info
 
     def get_cache_path(self):
-        cache_path = join(self.data_dir, f'cached.tensors.{self.language}.{self.max_seg_len}.{self.max_training_seg}{self.empty_suffix}.bin')
+        cache_path = join(self.data_dir, f'cached.tensors.{self.language}.{self.max_seg_len}.{self.max_training_seg}{self.empty_suffix}{self.additional_flags}.bin')
         return cache_path
 
 
@@ -120,12 +121,16 @@ class Tensorizer:
         self.stored_info = stored_info
         if self.stored_info is None:
             self.stored_info = {}
+            self.stored_info["subdocs_lens"] = {}
             self.stored_info['tokens'] = {}  # {doc_key: ...}
             self.stored_info['subtoken_maps'] = {}  # {doc_key: ...}; mapping back to tokens
             self.stored_info['gold'] = {}  # {doc_key: ...}
             self.stored_info['genre_dict'] = {genre: idx for idx, genre in enumerate(config['genres'])}
             self.stored_info['deprels_dict'] = {} if "deprels" not in config else {deprel: i for i, deprel in enumerate(config["deprels"])}
             self.stored_info["instructions_dict"] = {} if "instructions" not in config else {deprel: i for i, deprel in enumerate(config["instructions"])}
+        else:
+            if "subdocs_lens" not in self.stored_info:
+                self.stored_info["subdocs_lens"] = {}
 
 
     def _tensorize_spans(self, spans):
@@ -247,20 +252,46 @@ class Tensorizer:
         # assert np.all(heads <= gold_ends)
         # TODO for some languages heads are out of span
         assert input_mask.shape == input_ids.shape == speaker_ids.shape
+
+        if "subdocument_map" in example and max(example["subdocument_map"]) > 0:
+            subdoc_lens = []
+            index = 0
+            segments = 0
+            for sent_len in sentence_len:
+                index += sent_len
+                if index == len(example["subdocument_map"]):
+                    subdoc_lens.append(segments)
+                    break
+                while example["subdocument_map"][index] > len(subdoc_lens):
+                    subdoc_lens.append(segments)
+                    segments = 0
+                segments += 1
+            subdoc_lens = [l for l in subdoc_lens if l > 0]
+        else:
+            subdoc_lens = [input_ids.shape[0]]
+        self.stored_info["subdocs_lens"][doc_key] = subdoc_lens
+
         example_tensor = (input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
                           parents_tensor, deprels_tensor, instructions_tensor, heads,
                           gold_starts, gold_ends, gold_mention_cluster_map)
 
         if is_training and len(sentences) > self.config['max_training_sentences']:
-            return doc_key, self.truncate_example(*example_tensor)
+            max_offsets = torch.maximum(torch.tensor(0), torch.cumsum(torch.tensor(subdoc_lens), dim=0) - self.config['max_training_sentences'])
+            subdoc_index = random.randrange(len(max_offsets))
+            return doc_key, self.truncate_example(*example_tensor, sentence_offset=random.randrange(max_offsets[subdoc_index] + 1), max_sentences=min(self.config['max_training_sentences'], subdoc_lens[subdoc_index]))
         else:
             return doc_key, example_tensor
 
     def truncate_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
                          parents, deprels, instructions, heads=None,
-                         gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, sentence_offset=None):
-        max_sentences = self.config["max_training_sentences"] if is_training or "max_pred_sentences" not in self.config else self.config["max_pred_sentences"] 
+                         gold_starts=None, gold_ends=None, gold_mention_cluster_map=None,
+                         sentence_offset=None, max_sentences=None):
+        if max_sentences is None:
+            max_sentences = self.config["max_training_sentences"] if is_training or "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         num_sentences = input_ids.shape[0]
+        if num_sentences == max_sentences and sentence_offset == 0:
+            return input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, \
+                is_training, parents, deprels, instructions, heads, gold_starts, gold_ends, gold_mention_cluster_map
         assert num_sentences > max_sentences
 
         sent_offset = sentence_offset
@@ -292,14 +323,27 @@ class Tensorizer:
 
     def split_example(self, input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map, is_training,
                       parents, deprels, instructions, heads=None,
-                      gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, step=None):
+                      gold_starts=None, gold_ends=None, gold_mention_cluster_map=None, step=None, subdoc_lens=None):
         max_sentences = self.config["max_training_sentences"] if "max_pred_sentences" not in self.config else self.config["max_pred_sentences"]
         if step is None:
             step = max_sentences
         num_sentences = input_ids.shape[0]
-        logger.info(f"SPLITTING... Num segments: {num_sentences}")
         offset = 0
         splits = []
+        if subdoc_lens is not None:
+            if len(subdoc_lens) > 1:
+                logger.info("Splitting subdocuments...")
+            for length in subdoc_lens:
+                part = self.truncate_example(input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
+                                                    is_training, parents, deprels, instructions, heads, gold_starts, gold_ends,
+                                                    gold_mention_cluster_map, sentence_offset=offset, max_sentences=length)
+                offset += length
+                if length > max_sentences:
+                    splits.append(self.split_example(*part, step=step, subdoc_lens=None))
+                else:
+                    splits.append([part])
+            return splits
+        logger.info(f"SPLITTING... Num segments: {num_sentences}")
         while offset < num_sentences:
             splits.append(self.truncate_example(input_ids, input_mask, speaker_ids, sentence_len, genre, sentence_map,
                                                 is_training, parents, deprels, instructions, heads, gold_starts, gold_ends,
