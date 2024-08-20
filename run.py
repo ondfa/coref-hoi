@@ -338,7 +338,7 @@ class Runner:
                 print("Cross-segment coreference found.")
         return cross_examples, cross_segment_corefs
 
-    def compute_cross_segment_recall(self, examples, doc2pred, max_segments, heads_only=True):
+    def compute_cross_segment_recall(self, examples, doc2pred, max_segments, heads_only=True, nearest_only=False):
         correct_mentions = 0
         correct_corefs = 0
         sum = 0
@@ -348,8 +348,8 @@ class Runner:
                 for mention in cluster:
                     m2c[mention] = i
             gold_starts, gold_ends, gold_heads = example[1][-3], example[1][-2], example[1][-4]
-            _, nearest_cross_corefs = self.find_cross_segment_coreference([example], max_segments, nearest_only=True)
-            for ante, mention in zip(*torch.nonzero(nearest_cross_corefs[0], as_tuple=True)):
+            _, cross_corefs = self.find_cross_segment_coreference([example], max_segments, nearest_only=nearest_only)
+            for ante, mention in zip(*torch.nonzero(cross_corefs[0], as_tuple=True)):
                 if heads_only:
                     ante_span = gold_heads[ante].item(), gold_heads[ante].item()
                     mention_span = gold_heads[mention].item(), gold_heads[mention].item()
@@ -393,7 +393,7 @@ class Runner:
         for doc_key, tensor_example in tensor_examples:
             model.subtoken_map = torch.tensor(stored_info["subtoken_maps"][doc_key]).to(self.device)
             gold_clusters = stored_info['gold'][doc_key]
-            tensor_example = tensor_example[:-4]  # Strip out gold
+            # tensor_example = tensor_example[:-4]  # Strip out gold
             num_sentences = tensor_example[0].shape[0]
             if num_sentences <= max_sentences:
                 batch_examples = [[tensor_example]]
@@ -408,6 +408,7 @@ class Runner:
             for subdoc, subdoc_segments in zip(batch_examples, stored_info["subdocs_lens"][doc_key]):
                 offset = 0
                 for j, example in enumerate(subdoc):
+                    example = example[:-4]  # Strip out gold
                     example_gpu = [d.to(self.device) for d in example]
                     with torch.no_grad():
                         _, _, _, span_starts, span_ends, antecedent_idx, antecedent_scores, span2head_logits = model(*example_gpu)
@@ -451,6 +452,10 @@ class Runner:
             metrics["cross_segment_mentions_recall"] = mention_rec
             metrics["cross_segment_coreference_recall"] = coref_rec
             metrics["cross_segment_coreferences"] = count
+            mention_rec, coref_rec, count = self.compute_cross_segment_recall(tensor_examples, doc_to_prediction, self.config["max_pred_sentences"], heads_only=self.config["heads_only"], nearest_only=True)
+            metrics["nearest_cross_segment_mentions_recall"] = mention_rec
+            metrics["nearest_cross_segment_coreference_recall"] = coref_rec
+            metrics["nearest_cross_segment_coreferences"] = count
         for i, path in enumerate(conll_path):
             if self.config["eval_cross_segment"] or self.config["filter_long_mentions"]:
                 gold_data = udapi_io.read_data(conll_path)

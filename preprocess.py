@@ -449,7 +449,7 @@ def get_document(doc_key, language, seg_len, tokenizer, udapi_document=None, sol
         if last_ord >= node.ord:
             document_state.sentence_end[-1] = True
             if split_into_subdocs_uppercase and sentence_upper and sentence_len < len(document_state.subdoc_end):  # Whole sentence uppercased
-                document_state.subdoc_end[-sentence_len] = True
+                document_state.subdoc_end[-(sentence_len + 1)] = True
             sentence_len = 0
             sentence_upper = True
             # assert len(row) >= 12

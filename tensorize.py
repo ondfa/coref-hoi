@@ -259,13 +259,11 @@ class Tensorizer:
             segments = 0
             for sent_len in sentence_len:
                 index += sent_len
-                if index == len(example["subdocument_map"]):
-                    subdoc_lens.append(segments)
-                    break
-                while example["subdocument_map"][index] > len(subdoc_lens):
+                while example["subdocument_map"][index - 2] > len(subdoc_lens):  # skipping SEP token with next block id
                     subdoc_lens.append(segments)
                     segments = 0
                 segments += 1
+            subdoc_lens.append(segments)
             subdoc_lens = [l for l in subdoc_lens if l > 0]
         else:
             subdoc_lens = [input_ids.shape[0]]
