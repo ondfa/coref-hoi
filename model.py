@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 # from torchcrf import CRF
 from TorchCRF import CRF
-from transformers import AutoConfig, AutoModel, MT5EncoderModel
+from transformers import AutoConfig, AutoModel, MT5EncoderModel, T5EncoderModel
 import util
 import logging
 from typing import Iterable
@@ -199,6 +199,8 @@ class CorefModel(nn.Module):
         bert_config.attention_probs_dropout_prob = config['bert_dropout_rate']
         if "mt5" in config['bert_pretrained_name_or_path'].lower():
             model_class = MT5EncoderModel
+        elif "t5" in config['bert_pretrained_name_or_path'].lower():
+            model_class = T5EncoderModel
         else:
             model_class = AutoModel
         model = model_class.from_pretrained(config['bert_pretrained_name_or_path'], from_tf=config["from_tf"], trust_remote_code=True, config=bert_config)

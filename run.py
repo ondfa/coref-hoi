@@ -1,4 +1,6 @@
 import os
+from collections import defaultdict
+
 # os.environ['WANDB_DISABLED'] = 'true'
 import requests
 
@@ -50,8 +52,25 @@ def load_wandb_api_key(path):
     data = data.strip()
     return data
 
-def evaluate_coreud(gold_path, pred_path, python_cmd):
+
+def evaluate_coreud(gold_path, pred_path, python_cmd, exact_match=False):
+    scores = {}
     cmd = [python_cmd, "corefud-scorer/corefud-scorer.py", gold_path, pred_path]
+    scores["score"] = evaluate_corefud_single(cmd, pred_path)
+
+    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-s"]
+    scores["score_with_singletons"] = evaluate_corefud_single(cmd, pred_path)
+    if not exact_match:
+        return scores
+    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-a", "exact"]
+    scores["exact_match_score"] = evaluate_corefud_single(cmd, pred_path)
+
+    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-s", "-a", "exact"]
+    scores["exact_match_score_with_singletons"] = evaluate_corefud_single(cmd, pred_path)
+    return scores
+
+
+def evaluate_corefud_single(cmd, pred_path):
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     stdout, stderr = process.communicate()
     process.wait()
@@ -64,26 +83,13 @@ def evaluate_coreud(gold_path, pred_path, python_cmd):
     import re
     result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
     if result is None:
-        score = 0.0
-    else:
-        score = float(result.group(1))
+        return 0.0
+    return float(result.group(1))
 
-    cmd = ["python", "corefud-scorer/corefud-scorer.py", gold_path, pred_path, "-s"]
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    process.wait()
-
-    stdout = stdout.decode("utf-8")
-    # if stderr is not None:
-    #     logger.error(stderr)
-    logger.info("Official result with singletons for {}".format(pred_path))
-    logger.info(stdout)
-    result = re.search(r"CoNLL score: (\d+\.?\d*)", stdout)
-    if result is None:
-        score_with_singletons = 0.0
-    else:
-        score_with_singletons = float(result.group(1))
-    return score, score_with_singletons
+def eval_text(text_docs, gold_file, solve_empty_nodes=True):
+    pred_file = f"{gold_file.replace('.conllu', '')}-pred.conllu"
+    udapi_io.convert_text_to_conllu(text_docs, gold_file, pred_file, solve_empty_nodes)
+    evaluate_coreud(gold_file, pred_file, "python3.10")
 
 
 class Runner:
@@ -445,8 +451,12 @@ class Runner:
             conll_path = [conll_path]
         doc_to_prediction, doc_span_to_head, evaluator = self.predict(model, tensor_examples, stored_info)
         p, r, f = evaluator.get_prf()
-        metrics = {phase + '_Avg_Precision': p * 100, phase + '_Avg_Recall': r * 100, phase + '_Avg_F1': f * 100,
-                   phase + '_avg_corefud_score': 0.0, phase + "_avg_corefud_score_with_singletons": 0.0}
+        metrics = defaultdict(lambda: 0.0)
+        metrics[phase + '_Avg_Precision'] = p * 100
+        metrics[phase + '_Avg_Recall'] = r * 100
+        metrics[phase + '_Avg_F1'] = f * 100
+
+
         if self.config["eval_cross_segment"]:
             mention_rec, coref_rec, count = self.compute_cross_segment_recall(tensor_examples, doc_to_prediction, self.config["max_pred_sentences"], heads_only=self.config["heads_only"])
             metrics["cross_segment_mentions_recall"] = mention_rec
@@ -470,7 +480,7 @@ class Runner:
                 path = gold_fd.name
 
             dataset = path.split("/")[-1].split("-")[0]
-            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head)
+            udapi_docs = udapi_io.map_to_udapi(udapi_io.read_data(path), doc_to_prediction, stored_info['subtoken_maps'], doc_span_to_head, use_guess_span=self.config["heads_only"])
             if self.config["filter_long_mentions"]:
                 udapi_docs = udapi_io.filter_long_mentions(udapi_docs, self.config["max_mention_length"])
             if save_predictions:
@@ -484,13 +494,11 @@ class Runner:
             if not os.path.exists(gold_path):
                 gold_path = path
             logger.info(gold_path)
-            score, score_with_singletons = evaluate_coreud(gold_path, fd.name, self.config["python_cmd"])
-            metrics[phase + "_corefud_score"] = score
-            metrics[phase + "_corefud_score_with_singletons"] = score_with_singletons
-            metrics[phase + "_avg_corefud_score"] = (metrics[phase + "_avg_corefud_score"] * i + score) / (i + 1)
-            metrics[phase + "_avg_corefud_score_with_singletons"] = (metrics[phase + "_avg_corefud_score_with_singletons"] * i + score_with_singletons) / (i + 1)
-            metrics[phase + "_" + dataset + "_corefud_score"] = score
-            metrics[phase + "_" + dataset + "_corefud_score_with_singletons"] = score_with_singletons
+            scores = evaluate_coreud(gold_path, fd.name, self.config["python_cmd"], exact_match=self.config["exact_match"])
+            for metric_name, score in scores.items():
+                metrics[phase + "_corefud_" + metric_name] = score
+                metrics[phase + "_avg_corefud_" + metric_name] = (metrics[phase + "_avg_corefud_" + metric_name] * i + score) / (i + 1)
+                metrics[phase + "_" + dataset + "_corefud_" + metric_name] = score
             if save_predictions and self.config["final_path"]:
                 if not os.path.exists(self.config["final_path"]):
                     os.makedirs(self.config["final_path"])
